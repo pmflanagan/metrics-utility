@@ -460,7 +460,6 @@ dependencies = [
     { name = "pandas" },
     { name = "psycopg" },
     { name = "requests" },
-    { name = "segment-analytics-python" },
     { name = "setuptools" },
     { name = "sqlparse" },
 ]
@@ -486,7 +485,6 @@ requires-dist = [
     { name = "pandas", specifier = "~=3.0" },
     { name = "psycopg", specifier = "~=3.3" },
     { name = "requests", specifier = "~=2.32" },
-    { name = "segment-analytics-python", specifier = ">=2.3.6" },
     { name = "setuptools", specifier = ">=80.9.0" },
     { name = "sqlparse", specifier = "==0.6.1" },
 ]
@@ -745,20 +743,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pyjwt"
-version = "2.15.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/43/ea/5194e52748b0da83d71e082d75496eaec6e58f419f5e184786ded517e6a9/pyjwt-2.15.1.tar.gz", hash = "sha256:4f259e80cdfb6b3fc18a7de51fd1ef9ec79652f25019bae68975ca2468a34df8", size = 121252, upload-time = "2026-09-28T18:40:42.598Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/50/ca/44de4e75f8aadc457f0634be3b542815078ded46dca30efb960edeecad6e/pyjwt-2.15.1-py3-none-any.whl", hash = "sha256:42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193", size = 33860, upload-time = "2026-09-28T18:40:41.429Z" },
-]
-
-[package.optional-dependencies]
-crypto = [
-    { name = "cryptography" },
-]
-
-[[package]]
 name = "pytest"
 version = "9.0.2"
 source = { registry = "https://pypi.org/simple" }
@@ -901,20 +885,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c0/0a/1cdbabf9edd0ea7747efdf6c9ab4e7061b085aa7f9bfc36bb1601563b069/s3transfer-0.10.4.tar.gz", hash = "sha256:29edc09801743c21eb5ecbc617a152df41d3c287f67b615f73e5f750583666a7", size = 145287, upload-time = "2024-11-20T21:06:05.981Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/66/05/7957af15543b8c9799209506df4660cba7afc4cf94bfb60513827e96bed6/s3transfer-0.10.4-py3-none-any.whl", hash = "sha256:244a76a24355363a68164241438de1b72f8781664920260c48465896b712a41e", size = 83175, upload-time = "2024-11-20T21:06:03.961Z" },
-]
-
-[[package]]
-name = "segment-analytics-python"
-version = "2.4.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pyjwt", extra = ["crypto"] },
-    { name = "python-dateutil" },
-    { name = "requests" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/6c/e6/528c8b52eb7f2c35a4f240a06cdcdca0787b9667395cbef831a142230efb/segment_analytics_python-2.4.0.tar.gz", hash = "sha256:56184d755aa73415a59e113239f14ff0f98b3bd77b6bfea6c6034a87de561a38", size = 105138, upload-time = "2026-09-29T16:31:09.709Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/0c/ea/b28606a3b5aace55a9bcba7c547fa74a209aae71f0807cfc8f8df4dfcc45/segment_analytics_python-2.4.0-py3-none-any.whl", hash = "sha256:0e809bb5555454ac229e52c86c9998b7f6919ffa11cc9cfa70867dd3b2ea87a7", size = 39304, upload-time = "2026-09-29T16:31:08.504Z" },
 ]
 
 [[package]]

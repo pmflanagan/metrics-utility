@@ -7,11 +7,17 @@ import pandas as pd
 from metrics_utility.library.collectors.controller.job_host_summary import job_host_summary
 
 
+def _mock_db():
+    mock_db = MagicMock()
+    mock_db.cursor.return_value.__enter__.return_value.fetchone.return_value = (False, False)
+    return mock_db
+
+
 def test_job_host_summary_basic():
     """Test job_host_summary collector basic functionality."""
-    mock_db = MagicMock()
-    since = datetime.datetime(2024, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
-    until = datetime.datetime(2024, 1, 31, 23, 59, 59, tzinfo=datetime.timezone.utc)
+    mock_db = _mock_db()
+    since = datetime.datetime(2024, 1, 1, 0, 0, 0, tzinfo=datetime.UTC)
+    until = datetime.datetime(2024, 1, 31, 23, 59, 59, tzinfo=datetime.UTC)
 
     instance = job_host_summary(db=mock_db, since=since, until=until)
 
@@ -25,9 +31,9 @@ def test_job_host_summary_basic():
 @patch('metrics_utility.library.collectors.util._copy_table_pandas')
 def test_job_host_summary_calls_copy_table(mock_copy_pandas):
     """Test that job_host_summary calls copy_table with correct parameters."""
-    mock_db = MagicMock()
-    since = datetime.datetime(2024, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
-    until = datetime.datetime(2024, 1, 31, 23, 59, 59, tzinfo=datetime.timezone.utc)
+    mock_db = _mock_db()
+    since = datetime.datetime(2024, 1, 1, 0, 0, 0, tzinfo=datetime.UTC)
+    until = datetime.datetime(2024, 1, 31, 23, 59, 59, tzinfo=datetime.UTC)
     mock_copy_pandas.return_value = pd.DataFrame({'id': [1, 2], 'host_id': [10, 20]})
 
     instance = job_host_summary(db=mock_db, since=since, until=until)
@@ -44,9 +50,9 @@ def test_job_host_summary_calls_copy_table(mock_copy_pandas):
 @patch('metrics_utility.library.collectors.util._copy_table_pandas')
 def test_job_host_summary_query_contains_time_range(mock_copy_pandas):
     """Test that the query includes the time range."""
-    mock_db = MagicMock()
-    since = datetime.datetime(2024, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
-    until = datetime.datetime(2024, 1, 31, 23, 59, 59, tzinfo=datetime.timezone.utc)
+    mock_db = _mock_db()
+    since = datetime.datetime(2024, 1, 1, 0, 0, 0, tzinfo=datetime.UTC)
+    until = datetime.datetime(2024, 1, 31, 23, 59, 59, tzinfo=datetime.UTC)
     mock_copy_pandas.return_value = pd.DataFrame()
 
     instance = job_host_summary(db=mock_db, since=since, until=until)
@@ -65,9 +71,9 @@ def test_job_host_summary_query_contains_time_range(mock_copy_pandas):
 @patch('metrics_utility.library.collectors.util._copy_table_pandas')
 def test_job_host_summary_query_structure(mock_copy_pandas):
     """Test that the SQL query has expected structure."""
-    mock_db = MagicMock()
-    since = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
-    until = datetime.datetime(2024, 2, 1, tzinfo=datetime.timezone.utc)
+    mock_db = _mock_db()
+    since = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
+    until = datetime.datetime(2024, 2, 1, tzinfo=datetime.UTC)
     mock_copy_pandas.return_value = pd.DataFrame()
 
     instance = job_host_summary(db=mock_db, since=since, until=until)
@@ -89,9 +95,9 @@ def test_job_host_summary_query_structure(mock_copy_pandas):
 @patch('metrics_utility.library.collectors.util._copy_table_pandas')
 def test_job_host_summary_isoformat(mock_copy_pandas):
     """Test that datetime objects are converted to isoformat in query."""
-    mock_db = MagicMock()
-    since = datetime.datetime(2024, 6, 15, 12, 30, 45, tzinfo=datetime.timezone.utc)
-    until = datetime.datetime(2024, 6, 16, 14, 45, 30, tzinfo=datetime.timezone.utc)
+    mock_db = _mock_db()
+    since = datetime.datetime(2024, 6, 15, 12, 30, 45, tzinfo=datetime.UTC)
+    until = datetime.datetime(2024, 6, 16, 14, 45, 30, tzinfo=datetime.UTC)
     mock_copy_pandas.return_value = pd.DataFrame()
 
     instance = job_host_summary(db=mock_db, since=since, until=until)

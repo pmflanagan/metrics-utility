@@ -7,6 +7,8 @@ from metrics_utility.automation_controller_billing.dataframe_engine.base import 
 class DBDataframeHostMetric(Base):
     def build_dataframe(self):
         host_metric_concat = None
+        since = pd.Timestamp(self.extractor.extra_params['opt_since'])
+        since = since.tz_localize('UTC') if since.tzinfo is None else since.tz_convert('UTC')
 
         ###############################
         # Start a daily rollup code here
@@ -14,6 +16,11 @@ class DBDataframeHostMetric(Base):
         for data in self.extractor.iter_batches():
             # If the dataframe is empty, skip additional processing
             host_metric = data['host_metric']
+            if host_metric.empty:
+                continue
+
+            last_automation = pd.to_datetime(host_metric['last_automation'], format='ISO8601', utc=True)
+            host_metric = host_metric.loc[last_automation >= since].copy()
             if host_metric.empty:
                 continue
 

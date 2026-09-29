@@ -2218,9 +2218,7 @@ CREATE TABLE public.main_host (
     variables text NOT NULL,
     created_by_id integer,
     inventory_id integer NOT NULL,
-    last_job_host_summary_id integer,
     modified_by_id integer,
-    last_job_id integer,
     ansible_facts jsonb NOT NULL,
     ansible_facts_modified timestamp with time zone
 );
@@ -8353,20 +8351,6 @@ CREATE INDEX main_host_inventory_sources_inventorysource_id_b25d3959 ON public.m
 
 
 --
--- Name: main_host_last_job_host_summary_id_b8bd727d; Type: INDEX; Schema: public; Owner: awx
---
-
-CREATE INDEX main_host_last_job_host_summary_id_b8bd727d ON public.main_host USING btree (last_job_host_summary_id);
-
-
---
--- Name: main_host_last_job_id_d247075b; Type: INDEX; Schema: public; Owner: awx
---
-
-CREATE INDEX main_host_last_job_id_d247075b ON public.main_host USING btree (last_job_id);
-
-
---
 -- Name: main_host_modified_by_id_28b76283; Type: INDEX; Schema: public; Owner: awx
 --
 
@@ -11469,22 +11453,6 @@ ALTER TABLE ONLY public.main_host
 
 ALTER TABLE ONLY public.main_host_inventory_sources
     ADD CONSTRAINT main_host_inventory_sources_host_id_03f0dcdc_fk_main_host_id FOREIGN KEY (host_id) REFERENCES public.main_host(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: main_host main_host_last_job_host_summar_b8bd727d_fk_main_jobh; Type: FK CONSTRAINT; Schema: public; Owner: awx
---
-
-ALTER TABLE ONLY public.main_host
-    ADD CONSTRAINT main_host_last_job_host_summar_b8bd727d_fk_main_jobh FOREIGN KEY (last_job_host_summary_id) REFERENCES public.main_jobhostsummary(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
--- Name: main_host main_host_last_job_id_d247075b_fk_main_job_unifiedjob_ptr_id; Type: FK CONSTRAINT; Schema: public; Owner: awx
---
-
-ALTER TABLE ONLY public.main_host
-    ADD CONSTRAINT main_host_last_job_id_d247075b_fk_main_job_unifiedjob_ptr_id FOREIGN KEY (last_job_id) REFERENCES public.main_job(unifiedjob_ptr_id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --

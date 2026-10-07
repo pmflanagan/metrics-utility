@@ -4,6 +4,7 @@
 
 - `installed_collections`: change `name` to `collection`
 - Segment: enable `sync_mode`, remove `use_bulk`
+- `dashboard_jobs`: add `organization_name`
 - TODO
 
 

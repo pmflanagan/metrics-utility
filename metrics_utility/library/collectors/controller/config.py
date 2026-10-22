@@ -28,7 +28,8 @@ SETTINGS = [
 @collector
 def config(*, db=None, billing_provider_params={}, output=DictOutput()):
     settings = _get_controller_settings(db, keys=SETTINGS)
-    license_info = settings.get('LICENSE', {})
+    license_info = _normalize_license(settings)
+    controller_version = _get_controller_version(db) or _version('awx')
 
     return output.dict(
         {
@@ -68,7 +69,7 @@ def config(*, db=None, billing_provider_params={}, output=DictOutput()):
             'valid_key': license_info.get('valid_key'),
             # versions & config
             'billing_provider_params': billing_provider_params,
-            'controller_version': _get_controller_version(db) or _version('awx'),
+            'controller_version': controller_version,
             'metrics_utility_version': _version('metrics-utility'),  # version from setup.cfg
             'platform': {
                 'dist': distro.linux_distribution(),
@@ -80,60 +81,91 @@ def config(*, db=None, billing_provider_params={}, output=DictOutput()):
     )
 
 
-def _version(package):
-    try:
-        return version(package)
-    except PackageNotFoundError:
-        return None
+def _get_controller_settings(db, keys):
+    """Get controller settings from database using parameterized queries to prevent SQL injection."""
+    return _get_settings(db, keys)
 
 
 def _get_install_type():
+    """Detect the deployment type from environment variables."""
     if os.getenv('container') == 'oci':
         return 'openshift'
-
     if os.getenv('KUBERNETES_SERVICE_PORT'):
         return 'k8s'
-
     return 'traditional'
-
-
-def _get_controller_settings(db, keys):
-    """Get controller settings from database using parameterized queries to prevent SQL injection."""
-    settings = {}
-    with db.cursor() as cursor:
-        # Use parameterized query to prevent SQL injection
-        placeholders = ', '.join(['%s'] * len(keys))
-        cursor.execute(f'SELECT key, value FROM conf_setting WHERE key IN ({placeholders})', keys)
-        for key, value in cursor.fetchall():
-            if value:
-                settings[key] = json.loads(value, object_hook=_datetime_hook)
-    return settings
 
 
 def _get_controller_version(db):
     """Get AWX/Controller version from the main_instance DB table."""
-    sql = """
+    if db is None:
+        return None
+
+    query = """
         SELECT version
         FROM main_instance
-        WHERE enabled = true
-            AND version IS NOT NULL
-            AND version != ''
+        WHERE enabled = true AND version IS NOT NULL AND version != ''
         ORDER BY last_seen DESC
         LIMIT 1
     """
     with db.cursor() as cursor:
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        if result and result[0]:
-            return result[0]
+        cursor.execute(query)
+        row = cursor.fetchone()
+        if row and row[0]:
+            return row[0]
     return None
 
 
-def _datetime_hook(d):
-    new_d = {}
-    for key, value in d.items():
-        try:
-            new_d[key] = datetime.fromisoformat(value)
-        except (TypeError, ValueError):
-            new_d[key] = value
-    return new_d
+def _datetime_hook(data):
+    """Convert ISO 8601 string values in a decoded JSON object to datetimes."""
+    return {key: _as_datetime(value) for key, value in data.items()}
+
+
+def _get_settings(db, keys):
+    """Return decoded values for the requested ``conf_setting`` keys."""
+    if db is None:
+        return {}
+
+    placeholders = ', '.join(['%s'] * len(keys))
+    settings = {}
+    with db.cursor() as cursor:
+        cursor.execute(f'SELECT key, value FROM conf_setting WHERE key IN ({placeholders})', keys)
+        for key, value in cursor.fetchall():
+            if value:
+                settings[key] = _decode(value)
+    return settings
+
+
+def _decode(value):
+    """Decode a setting value, preserving values that are not JSON."""
+    if not isinstance(value, str):
+        return value
+
+    try:
+        return json.loads(value, object_hook=_datetime_hook)
+    except (TypeError, ValueError):
+        return value
+
+
+def _as_datetime(value):
+    """Convert one ISO 8601 string to a datetime, if possible."""
+    if not isinstance(value, str):
+        return value
+
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return value
+
+
+def _normalize_license(settings):
+    """Return license data as a mapping, or an empty mapping."""
+    license_info = settings.get('LICENSE')
+    return license_info if isinstance(license_info, dict) else {}
+
+
+def _version(package):
+    """Return an installed package version, or ``None`` if unavailable."""
+    try:
+        return version(package)
+    except PackageNotFoundError:
+        return None

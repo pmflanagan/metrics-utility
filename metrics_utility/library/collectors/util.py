@@ -8,8 +8,30 @@ from ..csv_file_splitter import CsvFileSplitter
 # default in db collectors
 # outputs a pandas DataFrame for SQL
 class DataframeOutput:
-    def sql(self, db, query):
-        return _copy_table_pandas(db, query)
+    def sql(self, db, query, params=None):
+        return _copy_table_pandas(db, query, params)
+
+    def sql_keyset(self, db, build_page, next_marker, page_size=10000):
+        import pandas as pd
+
+        marker = None
+        frames = []
+        while True:
+            query, params = build_page(marker, page_size)
+            df = _copy_table_pandas(db, query, params)
+            # Skip empty pages: concatenating an all-object empty frame would
+            # downgrade every column's dtype to object. A trailing empty page
+            # happens whenever the row count is an exact multiple of page_size.
+            if not df.empty:
+                frames.append(df)
+            if len(df) < page_size:
+                break
+            marker = next_marker(df.iloc[-1])
+
+        if not frames:
+            # No rows at all: return the last (empty) frame so callers still get the columns.
+            return df
+        return frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
 
 
 # default in dict collectors
@@ -50,9 +72,16 @@ class CollectionOutput(DictOutput):
     def as_files(self, collector):
         return self.files(collector.gather(output=self))
 
-    def sql(self, db, query):
+    def sql(self, db, query, params=None):
         filespec = tempfile.mktemp(dir=self.full_path)  # NOT mkstemp - this is a prefix, can't have it get created
-        return _copy_table_files(db, query, filespec)
+        return _copy_table_files(db, query, filespec, params)
+
+    def sql_keyset(self, db, build_page, next_marker, page_size=10000):
+        # COPY streams the whole result set server-side, so no keyset pagination is
+        # needed here; next_marker/page_size are accepted for interface parity and ignored.
+        query, params = build_page(None, None)
+        filespec = tempfile.mktemp(dir=self.full_path)  # NOT mkstemp - this is a prefix, can't have it get created
+        return _copy_table_files(db, query, filespec, params)
 
 
 # NOTE: `field` should be a hardcoded column name
@@ -100,13 +129,13 @@ def ensure_functions(db):
         cursor.execute(_yaml_json_functions())
 
 
-def _copy_table_files(db, query, filespec):
+def _copy_table_files(db, query, filespec, params=None):
     file = CsvFileSplitter(filespec=filespec)
 
     with db.cursor() as cursor:
         copy_query = f'COPY ({query}) TO STDOUT WITH CSV HEADER'
 
-        with cursor.copy(copy_query) as copy:
+        with cursor.copy(copy_query, params) as copy:
             while data := copy.read():
                 byte_data = bytes(data)
                 file.write(byte_data.decode())
@@ -114,13 +143,13 @@ def _copy_table_files(db, query, filespec):
     return file.file_list(keep_empty=True)
 
 
-def _copy_table_pandas(db, query):
+def _copy_table_pandas(db, query, params=None):
     import pandas as pd
 
     # Execute query and create DataFrame from results
     # Using cursor approach since pd.read_sql doesn't work well with psycopg3
     with db.cursor() as cursor:
-        cursor.execute(query)
+        cursor.execute(query, params)
 
         # Get column names from cursor description
         columns = [desc[0] for desc in cursor.description]

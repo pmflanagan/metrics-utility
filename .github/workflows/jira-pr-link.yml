@@ -1,0 +1,225 @@
+name: "Jira PR Link"
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  jira-pr-link:
+    if: github.repository_owner == 'ansible' || startsWith(github.event.pull_request.base.ref, 'stable-2.')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Extract Jira ticket from PR"
+        id: jira
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          TICKET=$(echo "$PR_TITLE" | grep -oP 'AAP-\d+' | head -1 || true)
+
+          if [[ -z "$TICKET" ]]; then
+            TICKET=$(echo "$PR_BODY" | grep -oP 'AAP-\d+' | head -1 || true)
+          fi
+
+          if [[ -z "$TICKET" ]]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "ticket=$TICKET" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: "Check commit messages for ticket"
+        if: steps.jira.outputs.found == 'false'
+        id: commit-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          TICKETS=$(gh pr view "$PR_NUMBER" \
+              --repo "${{ github.repository }}" \
+              --json commits \
+              --jq '[.commits[] | .messageHeadline + " " + .messageBody] | join("\n")' \
+              | grep -oP 'AAP-\d+' | sort -u || true)
+
+          TICKET=$(echo "$TICKETS" | head -1)
+
+          if [[ -z "$TICKET" ]]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "ticket=$TICKET" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: "Comment on PR if ticket is missing"
+        if: steps.jira.outputs.found == 'false' && steps.commit-check.outputs.found == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          MARKER="<!-- jira-pr-link-bot -->"
+          BODY="${MARKER}
+          No Jira ticket was found in the PR title, description, or commit message. To link this PR to a Jira issue, add the ticket number to the title, e.g. \`[AAP-12345] Your PR title\`."
+
+          COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" | head -1 || true)
+
+          if [[ -n "$COMMENT_ID" ]]; then
+            gh api "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
+              -X PATCH -f body="$BODY" || echo "::warning::Failed to update missing-ticket comment"
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "${{ github.repository }}" \
+              --body "$BODY" || echo "::warning::Failed to post missing-ticket comment"
+          fi
+
+      - name: "Update Jira Git Pull Request field"
+        id: jira-update
+        if: steps.jira.outputs.found == 'true' || steps.commit-check.outputs.found == 'true'
+        env:
+          JIRA_BASE_URL: ${{ vars.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.BOT_JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.BOT_JIRA_API_TOKEN }}
+          JIRA_PR_FIELD_ID: "customfield_10875"
+          TICKET: ${{ steps.jira.outputs.ticket || steps.commit-check.outputs.ticket }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          if [[ -z "$JIRA_BASE_URL" || -z "$JIRA_USER_EMAIL" || -z "$JIRA_API_TOKEN" ]]; then
+            echo "::warning::JIRA_BASE_URL, BOT_JIRA_EMAIL, and BOT_JIRA_API_TOKEN must be configured"
+            exit 0
+          fi
+
+          python3 << 'PYEOF'
+          import json, os, sys, urllib.request, urllib.error, base64
+
+          base_url = os.environ["JIRA_BASE_URL"]
+          email = os.environ["JIRA_USER_EMAIL"]
+          token = os.environ["JIRA_API_TOKEN"]
+          field_id = os.environ["JIRA_PR_FIELD_ID"]
+          ticket = os.environ["TICKET"]
+          pr_url = os.environ["PR_URL"]
+          github_output = os.environ["GITHUB_OUTPUT"]
+
+          auth = base64.b64encode(f"{email}:{token}".encode()).decode()
+          headers = {
+              "Authorization": f"Basic {auth}",
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+          }
+
+          def set_output(key, value):
+              with open(github_output, "a") as f:
+                  f.write(f"{key}={value}\n")
+
+          def find_urls(node):
+              """Recursively extract all URLs from an ADF tree."""
+              urls = set()
+              if isinstance(node, dict):
+                  for key in ("href", "url"):
+                      if key in node:
+                          urls.add(node[key])
+                  if isinstance(node.get("text"), str) and node["text"].startswith("http"):
+                      urls.add(node["text"])
+                  for value in node.values():
+                      urls |= find_urls(value)
+              elif isinstance(node, list):
+                  for item in node:
+                      urls |= find_urls(item)
+              return urls
+
+          def make_link_paragraph(url):
+              return {
+                  "type": "paragraph",
+                  "content": [{
+                      "type": "text",
+                      "text": url,
+                      "marks": [{"type": "link", "attrs": {"href": url}}],
+                  }],
+              }
+
+          # Fetch current field value
+          get_url = f"{base_url}/rest/api/3/issue/{ticket}?fields={field_id}"
+          req = urllib.request.Request(get_url, headers=headers)
+          try:
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  data = json.loads(resp.read())
+          except urllib.error.HTTPError as e:
+              print(f"::warning::Failed to fetch Jira ticket {ticket} (HTTP {e.code})")
+              sys.exit(0)
+          except (urllib.error.URLError, TimeoutError) as e:
+              print(f"::warning::Failed to fetch Jira ticket {ticket} ({e})")
+              sys.exit(0)
+
+          current = data.get("fields", {}).get(field_id)
+
+          # Duplicate check — deep search through the entire ADF tree
+          if isinstance(current, str) and pr_url in current:
+              print(f"{pr_url} already linked on {ticket}, skipping")
+              set_output("linked", "true")
+              sys.exit(0)
+          if isinstance(current, dict) and pr_url in find_urls(current):
+              print(f"{pr_url} already linked on {ticket}, skipping")
+              set_output("linked", "true")
+              sys.exit(0)
+
+          new_paragraph = make_link_paragraph(pr_url)
+
+          if isinstance(current, dict) and current.get("content"):
+              current["content"].append(new_paragraph)
+              updated_adf = current
+          elif isinstance(current, str) and current.startswith("http"):
+              updated_adf = {
+                  "type": "doc",
+                  "version": 1,
+                  "content": [make_link_paragraph(current), new_paragraph],
+              }
+          else:
+              updated_adf = {
+                  "type": "doc",
+                  "version": 1,
+                  "content": [new_paragraph],
+              }
+
+          # Write back
+          put_url = f"{base_url}/rest/api/3/issue/{ticket}"
+          payload = json.dumps({"fields": {field_id: updated_adf}}).encode()
+          req = urllib.request.Request(put_url, data=payload, headers=headers, method="PUT")
+          try:
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  pass
+              print(f"Updated {ticket} Git Pull Request field with {pr_url}")
+              set_output("linked", "true")
+          except urllib.error.HTTPError as e:
+              body = e.read().decode() if hasattr(e, "read") else ""
+              print(f"::warning::Failed to update Jira ticket {ticket} (HTTP {e.code})")
+              if body:
+                  print(body)
+          except (urllib.error.URLError, TimeoutError) as e:
+              print(f"::warning::Failed to update Jira ticket {ticket} ({e})")
+          PYEOF
+
+      - name: "Comment on PR with linked ticket"
+        if: steps.jira-update.outputs.linked == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TICKET: ${{ steps.jira.outputs.ticket || steps.commit-check.outputs.ticket }}
+        run: |
+          MARKER="<!-- jira-pr-link-bot -->"
+          BODY="${MARKER}
+          This PR has been automatically linked to ${TICKET} in Jira."
+
+          COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" | head -1 || true)
+
+          if [[ -n "$COMMENT_ID" ]]; then
+            gh api "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
+              -X PATCH -f body="$BODY" || echo "::warning::Failed to update linked-ticket comment"
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "${{ github.repository }}" \
+              --body "$BODY" || echo "::warning::Failed to post linked-ticket comment"
+          fi

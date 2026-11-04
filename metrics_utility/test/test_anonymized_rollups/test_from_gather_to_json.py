@@ -2,6 +2,7 @@ import json
 import os
 import re
 import shutil
+import urllib.request
 
 import pandas as pd
 import pytest
@@ -18,6 +19,7 @@ from metrics_utility.library.collectors.controller import (
     table_metadata,
     unified_jobs,
 )
+from metrics_utility.library.storage.segment import StorageSegment
 from metrics_utility.test.test_anonymized_rollups.helpers import compute_anonymized_rollup_from_raw_data
 from metrics_utility.test.util import utcdt
 
@@ -1009,10 +1011,14 @@ def _validate_all_data(json_data, statistics):
     print('✅ All data value assertions passed!')
 
 
+MOCK_SEGMENT_URL = os.getenv('MOCK_SEGMENT_URL', 'http://localhost:8765')
+
+
 def test_from_gather_to_json(cleanup_glob):
-    """
-    Test collecting data from collectors for two hourly intervals (10:00-11:00 and 11:00-12:00)
-    and computing anonymized rollup from raw data.
+    """Gather, validate, and send an anonymized rollup to the mock Segment server.
+
+    The test also asserts that the expected number of gzip-compressed batch
+    requests and chunked track events are received.
     """
     # Define collectors similar to run_no_events.py
     COLLECTORS = {
@@ -1087,3 +1093,40 @@ def test_from_gather_to_json(cleanup_glob):
     # Validate all data
     statistics = json_data['statistics']
     _validate_all_data(json_data, statistics)
+    # --- Send to mock Segment server and validate the HTTP traffic ---
+    print(f'\nSending rollup to mock Segment server at {MOCK_SEGMENT_URL} ...')
+
+    # Clear any requests captured from previous test runs.
+    req = urllib.request.Request(f'{MOCK_SEGMENT_URL}/reset', method='POST')
+    urllib.request.urlopen(req)
+
+    storage = StorageSegment(write_key='test-key', host=MOCK_SEGMENT_URL, allow_insecure_host=True)
+    chunks = storage.put('anonymized_rollup', dict=json_data)
+
+    assert chunks, 'StorageSegment.put() should return a non-empty list of chunks'
+
+    # Fetch what the mock server captured.
+    with urllib.request.urlopen(f'{MOCK_SEGMENT_URL}/requests') as resp:
+        captured = json.loads(resp.read())
+
+    assert len(captured) >= 1
+    received_events = []
+    for i, req in enumerate(captured, 1):
+        assert req['path'] == '/v1/batch'
+        assert req['content_encoding'] == 'gzip'
+        batch = req['body']['batch']
+        assert batch, f'Request {i}: expected a non-empty batch'
+        received_events.extend(batch)
+
+    assert len(received_events) == len(chunks), f'Mock Segment server received {len(received_events)} events but expected {len(chunks)}'
+
+    for i, event in enumerate(received_events, 1):
+        props = event['properties']
+
+        assert event['event'] == 'Metrics Artifact Upload', f'Request {i}: unexpected event name {event["event"]!r}'
+        assert props['artifact_name'] == 'anonymized_rollup', f'Request {i}: unexpected artifact_name {props["artifact_name"]!r}'
+        assert props['chunk_info']['total_chunks'] == len(chunks), f'Request {i}: total_chunks mismatch'
+        assert props['chunk_info']['chunk_number'] == i, f'Request {i}: chunk_number should be {i}, got {props["chunk_info"]["chunk_number"]}'
+        assert props['chunk_info']['chunk_size'] > 0, f'Request {i}: chunk_size should be positive'
+
+    print(f'✅ Segment: {len(received_events)} chunk(s) received in {len(captured)} batch request(s) and validated.')

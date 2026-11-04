@@ -71,6 +71,7 @@ Such tarball can then be passed to a Storage class, and gets cleaned up afterwar
 #### Storage
 
 Storage objects serve to provide a shared interface for various storage modes. Each can be initialized with an appropriate configuration, and can retrieve or save objects from/to long-term storage.
+`StorageSegment` (in `metrics_utility.library.storage`) provides a put-only interface for pushing data to Segment's HTTP Tracking API. It sends bounded `/v1/batch` requests directly, gzip-compressed by default, without starting SDK worker threads.
 
 Mainly S3 and local directories are supported,
 but the Storage mechanism can also be used to push the data to cloud APIs or to save it in a local DB.
@@ -119,8 +120,10 @@ StorageS3(
 # StorageSegment - segment analytics (put-only)
 #
 # debug = bool
-# user_id = string, passed to analytics.track
-# write_key = https://segment.com/docs/connections/sources/catalog/libraries/server/python/#getting-started
+# user_id = string
+# write_key = Segment source write key
+# gzip = bool, defaults to True
+# anonymous_id = optional ID to reuse across related anonymized sends
 
 StorageSegment(
     debug=False,
@@ -128,6 +131,18 @@ StorageSegment(
     write_key='...',
 )
 ```
+
+Also allows an HTTPS `host` override. Loopback HTTP mock servers such as
+`http://localhost:8765` are accepted; single-label internal test hosts such as
+`http://mock-segment:8765` require the explicit test-only setting
+`allow_insecure_host=True`. Dotted remote HTTP hosts are always rejected.
+
+For retry-safe sends, pass
+`segment_meta={'message_id': '<stable-upload-id>'}`. A caller may also pass
+`anonymous_id` to preserve anonymous identity correlation, but it is separate
+from Segment's message deduplication. Existing callers that omit `message_id`
+retain the generated-ID behavior, but a task retry can create duplicates unless
+it reuses a stable message ID.
 
 ```
 # StorageCRC - console.redhat.com, using service accounts (put-only)

@@ -124,9 +124,29 @@ def collector(func):
 
 
 def ensure_functions(db):
-    # Execute prepend_query if needed (custom PostgreSQL functions)
+    """Create the custom PostgreSQL helper functions used by collectors if missing.
+
+    Installs ``metrics_utility_parse_yaml_field`` and
+    ``metrics_utility_is_valid_json`` into the active database connection.
+    Existing functions are left untouched so newer Controller implementations
+    can provide hardened versions of these helpers.
+
+    Args:
+        db: Django database connection.
+    """
     with db.cursor() as cursor:
-        cursor.execute(_yaml_json_functions())
+        cursor.execute(
+            """
+            SELECT
+                to_regprocedure('metrics_utility_parse_yaml_field(text,text)') IS NOT NULL,
+                to_regprocedure('metrics_utility_is_valid_json(text)') IS NOT NULL
+            """
+        )
+        existing = cursor.fetchone()
+        missing = {name for name, present in zip(_YAML_JSON_FUNCTIONS, existing, strict=True) if not present}
+
+        if missing:
+            cursor.execute(_yaml_json_functions(missing))
 
 
 def _copy_table_files(db, query, filespec, params=None):
@@ -163,10 +183,20 @@ def _copy_table_pandas(db, query, params=None):
     return df
 
 
-def _yaml_json_functions():
-    return """
+_YAML_JSON_FUNCTIONS = (
+    'metrics_utility_parse_yaml_field',
+    'metrics_utility_is_valid_json',
+)
+
+
+def _yaml_json_functions(missing):
+    """Return definitions for the missing custom PostgreSQL helper functions."""
+    definitions = []
+    if 'metrics_utility_parse_yaml_field' in missing:
+        definitions.append(
+            """
         -- Define function for parsing field out of yaml encoded as text
-        CREATE OR REPLACE FUNCTION metrics_utility_parse_yaml_field(
+        CREATE FUNCTION metrics_utility_parse_yaml_field(
             str text,
             field text
         )
@@ -182,9 +212,14 @@ def _yaml_json_functions():
         END;
         $$
         LANGUAGE plpgsql;
+            """
+        )
 
+    if 'metrics_utility_is_valid_json' in missing:
+        definitions.append(
+            """
         -- Define function to check if field is a valid json
-        CREATE OR REPLACE FUNCTION metrics_utility_is_valid_json(p_json text)
+        CREATE FUNCTION metrics_utility_is_valid_json(p_json text)
             returns boolean
         AS
         $$
@@ -196,4 +231,7 @@ def _yaml_json_functions():
         END;
         $$
         LANGUAGE plpgsql;
-    """
+            """
+        )
+
+    return '\n'.join(definitions)

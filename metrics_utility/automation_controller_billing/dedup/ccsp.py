@@ -183,10 +183,7 @@ class DedupCCSP:
         serial_to_hosts = defaultdict(set)
         serial_to_first = {}
 
-        for _, row in df.iterrows():
-            host = row['host_name']
-            serials = row['serials']
-
+        for host, serials in zip(df['host_name'], df['serials'], strict=True):
             if isinstance(serials, Iterable):
                 for serial in serials:
                     if isinstance(serial, str) and serial:

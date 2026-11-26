@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from unittest.mock import Mock
 
 import pandas as pd
@@ -251,6 +252,132 @@ class TestDedupCCSP:
         result = dedup.df_to_mapping(df)
 
         assert result == {}
+
+    def test_df_to_mapping_empty_dataframe_with_extra_columns(self, mock_dataframes, base_extra_params):
+        """An empty frame with unrelated columns still yields an empty mapping."""
+        dedup = DedupCCSP(mock_dataframes, base_extra_params)
+
+        df = pd.DataFrame({'host_name': [], 'serials': [], 'install_uuid': [], 'organization_name': []})
+        df['install_uuid'] = df['install_uuid'].astype('category')
+        df['organization_name'] = df['organization_name'].astype('category')
+
+        assert dedup.df_to_mapping(df) == {}
+
+    def test_df_to_mapping_preserves_first_seen_order_across_hosts(self, mock_dataframes, base_extra_params):
+        """First-seen canonical host wins when serials overlap across many hosts."""
+        dedup = DedupCCSP(mock_dataframes, base_extra_params)
+
+        df = pd.DataFrame(
+            {
+                'host_name': ['h1', 'h2', 'h3', 'h4', 'h5'],
+                'serials': [
+                    ['shared'],
+                    ['shared'],
+                    ['shared'],
+                    ['shared'],
+                    ['shared'],
+                ],
+            }
+        )
+
+        result = dedup.df_to_mapping(df)
+
+        assert result == {'h1': 'h1', 'h2': 'h1', 'h3': 'h1', 'h4': 'h1', 'h5': 'h1'}
+
+    def test_df_to_mapping_multiple_serials_per_host_chain(self, mock_dataframes, base_extra_params):
+        """A host with two serials bridges two groups via the first-seen canonical."""
+        dedup = DedupCCSP(mock_dataframes, base_extra_params)
+
+        df = pd.DataFrame(
+            {
+                'host_name': ['a', 'b', 'c', 'd'],
+                'serials': [['s1'], ['s1', 's2'], ['s2'], ['s3']],
+            }
+        )
+
+        result = dedup.df_to_mapping(df)
+
+        assert result == {'a': 'a', 'b': 'b', 'c': 'b', 'd': 'd'}
+
+    def test_df_to_mapping_duplicate_hostnames(self, mock_dataframes, base_extra_params):
+        """A repeated hostname keeps its mapping and is stable."""
+        dedup = DedupCCSP(mock_dataframes, base_extra_params)
+
+        df = pd.DataFrame(
+            {
+                'host_name': ['host1', 'host1', 'host2'],
+                'serials': [['serial1'], ['serial1'], ['serial1']],
+            }
+        )
+
+        result = dedup.df_to_mapping(df)
+
+        assert result == {'host1': 'host1', 'host2': 'host1'}
+
+    def test_df_to_mapping_none_row_serials(self, mock_dataframes, base_extra_params):
+        """None (non-iterable) serials for a row are skipped entirely."""
+        dedup = DedupCCSP(mock_dataframes, base_extra_params)
+
+        df = pd.DataFrame(
+            {
+                'host_name': ['host1', 'host2', 'host3'],
+                'serials': [None, None, ['serial1']],
+            }
+        )
+
+        result = dedup.df_to_mapping(df)
+
+        assert result == {'host3': 'host3'}
+
+    def test_df_to_mapping_string_serials_treated_as_iterable(self, mock_dataframes, base_extra_params):
+        """A bare string serial is iterable, so each character becomes a serial (parity)."""
+        dedup = DedupCCSP(mock_dataframes, base_extra_params)
+
+        df = pd.DataFrame(
+            {
+                'host_name': ['host1', 'host2'],
+                'serials': ['ab', 'ab'],
+            }
+        )
+
+        result = dedup.df_to_mapping(df)
+
+        # 'a' and 'b' are both serials of both hosts -> every host maps to host1
+        assert result == {'host1': 'host1', 'host2': 'host1'}
+
+    def test_df_to_mapping_matches_iterrows_semantics(self, mock_dataframes, base_extra_params):
+        """zip-based iteration produces the same result as the old iterrows loop."""
+        dedup = DedupCCSP(mock_dataframes, base_extra_params)
+
+        df = pd.DataFrame(
+            {
+                'host_name': ['host1', 'host2', 'host3', 'host4', 'host5'],
+                'serials': [
+                    ['serial1', 'serial2'],
+                    ['serial2'],
+                    [],
+                    [float('nan'), 'serial3'],
+                    ['serial3', ''],
+                ],
+            }
+        )
+
+        expected = {}
+        serial_to_hosts = {}
+        serial_to_first = {}
+        for _, row in df.iterrows():
+            host = row['host_name']
+            serials = row['serials']
+            if isinstance(serials, Iterable):
+                for serial in serials:
+                    if isinstance(serial, str) and serial:
+                        serial_to_hosts.setdefault(serial, set()).add(host)
+                        serial_to_first.setdefault(serial, host)
+        for serial, hosts in serial_to_hosts.items():
+            for host in hosts:
+                expected[host] = serial_to_first[serial]
+
+        assert dedup.df_to_mapping(df) == expected
 
     def test_run_with_null_host_data(self, mock_dataframes, base_extra_params):
         """Test run method with None host data."""

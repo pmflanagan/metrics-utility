@@ -1,8 +1,63 @@
 """Dataframe engine for content (module/collection/role) usage from main_jobevent."""
 
+import functools
 import re
 
 from metrics_utility.automation_controller_billing.dataframe_engine.base import Base
+
+
+# Precompiled patterns.  These are the single source of truth for the
+# ``collection_regexp()`` / ``standalone_role_regexp()`` accessors below.
+_COLLECTION_RE = re.compile(r'^(\w+)\.(\w+)\.(\w+)(?:\.\w+)*$')
+_STANDALONE_ROLE_RE = re.compile(r'^(\w+)\.(\w+)$')
+
+
+@functools.lru_cache(maxsize=4096)
+def _extract_collection_name_cached(x: str) -> str | None:
+    """Cached core of :meth:`DataframeContentUsage.extract_collection_name`.
+
+    Callers must guarantee ``x`` is a ``str`` so that only hashable values
+    reach the cache.
+
+    Args:
+        x: Module name string.
+
+    Returns:
+        Two-part collection name string, or None.
+    """
+    if '.' not in x:
+        return None
+
+    m = _COLLECTION_RE.match(x)
+
+    return f'{m.group(1)}.{m.group(2)}' if m else None
+
+
+@functools.lru_cache(maxsize=4096)
+def _extract_role_name_cached(x: str) -> str | None:
+    """Cached core of :meth:`DataframeContentUsage.extract_role_name`.
+
+    Callers must guarantee ``x`` is a ``str`` so that only hashable values
+    reach the cache.
+
+    Args:
+        x: Role name string.
+
+    Returns:
+        Normalised role name string, or None.
+    """
+    if '.' not in x:
+        return None
+
+    collection_role = _COLLECTION_RE.match(x)
+    if collection_role:
+        return f'{collection_role.group(1)}.{collection_role.group(2)}.{collection_role.group(3)}'
+
+    standalone_role = _STANDALONE_ROLE_RE.match(x)
+    if standalone_role:
+        return f'{standalone_role.group(1)}.{standalone_role.group(2)}'
+
+    return None
 
 
 # dataframe for main_jobevent
@@ -38,12 +93,12 @@ class DataframeContentUsage(Base):
                 events['task_action'] = events.resolved_action.fillna(events.task_action).astype(str)
                 events['role'] = events.resolved_role.fillna(events.role).astype(str)
                 # Only get valid role names into role name
-                events['role'] = events['role'].apply(lambda x: self.extract_role_name(x))
+                events['role'] = events['role'].map(self.extract_role_name)
 
                 # Rename columns to match the reality, they are just names, not normalized cols anymore
                 events.rename(columns={'task_action': 'module_name', 'role': 'role_name'}, inplace=True)
 
-                events['collection_name'] = events['module_name'].apply(self.extract_collection_name)
+                events['collection_name'] = events['module_name'].map(self.extract_collection_name)
 
                 # Final cleanup if some module names didn't connect, otherwise this will fail
                 # to insert with not null constraint on module_name
@@ -97,7 +152,7 @@ class DataframeContentUsage(Base):
         Returns:
             Regex pattern string.
         """
-        return r'^(\w+)\.(\w+)\.(\w+)(?:\.\w+)*$'
+        return _COLLECTION_RE.pattern
 
     @staticmethod
     def standalone_role_regexp():
@@ -106,7 +161,7 @@ class DataframeContentUsage(Base):
         Returns:
             Regex pattern string.
         """
-        return r'^(\w+)\.(\w+)$'
+        return _STANDALONE_ROLE_RE.pattern
 
     @staticmethod
     def extract_collection_name(x):
@@ -121,12 +176,7 @@ class DataframeContentUsage(Base):
         if not isinstance(x, str):
             return None
 
-        m = re.match(DataframeContentUsage.collection_regexp(), x)
-
-        if m:
-            return f'{m.groups()[0]}.{m.groups()[1]}'
-        else:
-            return None
+        return _extract_collection_name_cached(x)
 
     @staticmethod
     def extract_role_name(x):
@@ -141,15 +191,7 @@ class DataframeContentUsage(Base):
         if not isinstance(x, str):
             return None
 
-        collection_role = re.match(DataframeContentUsage.collection_regexp(), x)
-        standalone_role = re.match(DataframeContentUsage.standalone_role_regexp(), x)
-
-        if collection_role:
-            return f'{collection_role.groups()[0]}.{collection_role.groups()[1]}.{collection_role.groups()[2]}'
-        elif standalone_role:
-            return f'{standalone_role.groups()[0]}.{standalone_role.groups()[1]}'
-        else:
-            return None
+        return _extract_role_name_cached(x)
 
     @staticmethod
     def unique_index_columns():

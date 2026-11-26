@@ -76,6 +76,10 @@ class DataframeInventoryScope(Base):
 
                 # Batches are non-empty here (skipped above) and canonical_facts
                 # is a single column, so the column can be read directly.
+                # Parse each row exactly once: both serial_from_facts() and the
+                # later merge_json_sets() aggregation consume the parsed value,
+                # halving json.loads() calls on this column.
+                billing_data['canonical_facts'] = [parse_json(v) for v in billing_data['canonical_facts']]
                 billing_data['serial'] = billing_data['canonical_facts'].map(serial_from_facts)
 
                 experimental_dedup = self.extra_params.get('deduplicator') == 'ccsp-experimental'

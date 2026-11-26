@@ -18,6 +18,7 @@ from defusedxml import ElementTree
 from odf import teletype
 from odf.opendocument import load as load_ods
 from odf.table import TableCell
+from openpyxl import Workbook as OpenpyxlWorkbook
 from openpyxl import load_workbook
 from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
 
@@ -502,3 +503,246 @@ def test_renewal_definition_renders_optional_sheets(setup_processed_dataframe, t
             'Managed nodes ephemeral usage',
             'Deleted Managed nodes',
         ]
+
+
+def _render_without_style_cache(definition):
+    """The pre-caching renderer, kept as the reference for XML parity."""
+    from metrics_utility.automation_controller_billing.report.renderers import xlsx as xlsx_renderer
+
+    workbook = OpenpyxlWorkbook()
+    workbook.remove(workbook.active)
+    fonts, fills, borders, alignments = {}, {}, {}, {}
+    for sheet in definition.worksheets:
+        ws = workbook.create_sheet(sheet.title)
+        for start_row, start_column, end_row, end_column in sheet.merges:
+            ws.merge_cells(start_row=start_row, start_column=start_column, end_row=end_row, end_column=end_column)
+        for source in sheet.cells.values():
+            cell = ws.cell(source.row, source.column)
+            if source.value is not None:
+                xlsx_renderer._set_value(cell, source.value)
+            xlsx_renderer._apply_styles(cell, source, fonts, fills, borders, alignments)
+            if source.number_format is not None:
+                cell.number_format = source.number_format
+        xlsx_renderer._apply_dimensions(ws, sheet)
+    return workbook
+
+
+def test_xlsx_shared_styles_are_cached_without_sharing_mutable_arrays(tmp_path):
+    definition = Workbook()
+    sheet = definition.active
+    font = Font(name='Arial', size=10, color='FF0000', bold=True)
+    fill = PatternFill('solid', fg_color='92d050')
+    border = Border(left=Side(border_style='thin', color='000000'))
+    alignment = Alignment(horizontal='center', vertical='center')
+    for row in range(1, 4):
+        cell = sheet.cell(row, 1)
+        cell.value = f'row {row}'
+        cell.font = font
+        cell.fill = fill
+        cell.border = border
+        cell.alignment = alignment
+        cell.number_format = '$#,##0.00'
+
+    ws = render_xlsx(definition).active
+    assert bytes(ws['A1']._style) == bytes(ws['A2']._style) == bytes(ws['A3']._style)
+    assert ws['A1']._style is not ws['A2']._style
+    assert ws['A2']._style is not ws['A3']._style
+    assert ws['A1'].number_format == ws['A2'].number_format == ws['A3'].number_format == '$#,##0.00'
+    assert ws['A1'].font.name == 'Arial'
+    assert ws['A1'].fill.fgColor.rgb[-6:] == '92d050'
+    assert ws['A1'].border.left.border_style == 'thin'
+    assert ws['A1'].alignment.horizontal == 'center'
+
+    untouched = bytes(ws['A2']._style)
+    ws['A1'].font = Font(name='Courier New', size=20)
+    ws['A1'].border = Border(bottom=Side(border_style='double', color='FF0000'))
+    ws['A1'].number_format = '0.00%'
+    assert bytes(ws['A2']._style) == untouched
+    assert ws['A2'].font.name == 'Arial'
+    assert ws['A2'].border.left.border_style == 'thin'
+    assert ws['A2'].number_format == '$#,##0.00'
+
+    path = tmp_path / 'report.xlsx'
+    render_xlsx(definition).save(path)
+    saved = load_workbook(path).active
+    assert saved['A1'].number_format == saved['A2'].number_format == saved['A3'].number_format == '$#,##0.00'
+    assert saved['A2'].fill.fgColor.rgb[-6:] == '92d050'
+
+
+def test_xlsx_assigns_each_distinct_style_once_per_workbook(monkeypatch):
+    from openpyxl.styles.styleable import StyleDescriptor
+
+    assigned = []
+    original = StyleDescriptor.__set__
+
+    def counting_set(self, instance, value):
+        assigned.append(self.key)
+        return original(self, instance, value)
+
+    monkeypatch.setattr(StyleDescriptor, '__set__', counting_set)
+
+    definition = Workbook()
+    sheet = definition.active
+    font = Font(name='Arial', size=10, bold=True)
+    fill = PatternFill('solid', fg_color='92d050')
+    for row in range(1, 6):
+        cell = sheet.cell(row, 1)
+        cell.value = f'row {row}'
+        cell.font = font
+        cell.fill = fill
+    render_xlsx(definition)
+
+    assert assigned.count('fontId') == 1
+    assert assigned.count('fillId') == 1
+
+
+def test_xlsx_implicit_date_formats_survive_shared_font_caching(tmp_path):
+    definition = Workbook()
+    sheet = definition.active
+    font = Font(name='Arial', size=10, bold=True)
+    rows = [
+        (datetime.datetime(2024, 4, 17, 12, 19, 38), 'yyyy-mm-dd h:mm:ss'),
+        (datetime.date(2024, 4, 17), 'yyyy-mm-dd'),
+        (datetime.timedelta(hours=36), '[hh]:mm:ss'),
+        (datetime.time(12, 34, 56), 'h:mm:ss'),
+        ('text', 'General'),
+        (42, 'General'),
+        (1.5, 'General'),
+    ]
+    for row, (value, _) in enumerate(rows, start=1):
+        cell = sheet.cell(row, 1)
+        cell.value = value
+        cell.font = font
+
+    workbook = render_xlsx(definition)
+    for row, (_, expected) in enumerate(rows, start=1):
+        assert workbook.active.cell(row, 1).number_format == expected
+
+    path = tmp_path / 'report.xlsx'
+    workbook.save(path)
+    saved = load_workbook(path).active
+    for row, (_, expected) in enumerate(rows, start=1):
+        assert saved.cell(row, 1).number_format == expected
+
+
+def test_xlsx_explicit_number_format_overrides_implicit_without_bleeding(tmp_path):
+    definition = Workbook()
+    sheet = definition.active
+    font = Font(name='Arial', size=10, bold=True)
+    sheet.cell(1, 1).value = datetime.datetime(2024, 4, 17, 12, 19, 38)
+    sheet.cell(1, 1).font = font
+    sheet.cell(1, 1).number_format = '$#,##0.00'
+    sheet.cell(2, 1).value = datetime.datetime(2024, 4, 17, 12, 19, 38)
+    sheet.cell(2, 1).font = font
+    sheet.cell(3, 1).value = 'label'
+    sheet.cell(3, 1).font = font
+    sheet.cell(4, 1).value = 12.5
+    sheet.cell(4, 1).font = font
+    sheet.cell(4, 1).number_format = '0.000'
+
+    path = tmp_path / 'report.xlsx'
+    render_xlsx(definition).save(path)
+    saved = load_workbook(path).active
+    assert saved['A1'].number_format == '$#,##0.00'
+    assert saved['A2'].number_format == 'yyyy-mm-dd h:mm:ss'
+    assert saved['A3'].number_format == 'General'
+    assert saved['A4'].number_format == '0.000'
+
+
+def _rich_definition():
+    """A definition covering every style, value type and format code path."""
+    book = Workbook()
+    book.remove(book.active)
+    date_font = Font(name='Arial', size=10, bold=True)
+    header_font = Font(name='Arial', size=11, bold=True)
+    header_border = Border(bottom=Side(border_style='double', color='000000'))
+
+    usage = book.create_sheet('Usage')
+    usage.column_dimensions[1].width = 24
+    usage.row_dimensions[1].height = 30
+    usage.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
+    title = usage.cell(1, 1)
+    title.value = 'Usage report'
+    title.font = Font(name='Arial', size=14, color='FFFFFF', bold=True)
+    title.fill = PatternFill('solid', fg_color='000000')
+    title.alignment = Alignment(horizontal='center', vertical='center')
+    title.border = Border(bottom=Side(border_style='thin', color='000000'))
+
+    for column, label in enumerate(['Host', 'Count', 'Cost'], start=1):
+        cell = usage.cell(2, column)
+        cell.value = label
+        cell.font = header_font
+        cell.border = header_border
+        cell.fill = PatternFill('solid', fg_color='d9d9d9')
+
+    body = [('node-1', 3, 12.5), ('node-2', 0, 0.0), ('node-3', 1, 2.25)]
+    for row, (host, count, cost) in enumerate(body, start=3):
+        usage.cell(row, 1).value = host
+        usage.cell(row, 2).value = count
+        usage.cell(row, 2).alignment = Alignment(horizontal='right')
+        usage.cell(row, 3).value = cost
+        usage.cell(row, 3).number_format = '$#,##0.00'
+    usage.cell(6, 2).value = Sum(CellReference(3, 2), CellReference(5, 2))
+    usage.cell(6, 3).value = Sum(CellReference(3, 3), CellReference(5, 3))
+    usage.cell(6, 3).number_format = '$#,##0.00'
+    usage.cell(6, 3).font = header_font
+    usage.cell(7, 3).value = Multiply(CellReference(6, 2), CellReference(3, 3))
+    usage.cell(7, 3).font = header_font
+    usage.cell(7, 3).number_format = 'General'
+
+    status = book.create_sheet('Data collection status')
+    status.cell(1, 1).value = 'Warning\nSecond line'
+    status.cell(1, 1).fill = PatternFill('solid', fg_color='ffcc17')
+    status.cell(1, 1).alignment = Alignment(horizontal='center', vertical='center')
+    status.cell(2, 1).value = datetime.datetime(2024, 4, 17, 12, 19, 38, 762500)
+    status.cell(2, 1).font = date_font
+    status.cell(3, 1).value = datetime.date(2024, 4, 17)
+    status.cell(3, 1).font = date_font
+    status.cell(4, 1).value = datetime.timedelta(hours=36, microseconds=123456)
+    status.cell(4, 1).font = date_font
+    status.cell(5, 1).value = datetime.time(12, 34, 56, 123456)
+    status.cell(5, 1).font = date_font
+    status.cell(6, 1).value = 'plain text'
+    status.cell(6, 1).font = date_font
+    status.cell(7, 1).value = 42
+    status.cell(7, 1).font = date_font
+    status.cell(8, 1).value = datetime.datetime(2024, 4, 17)
+    status.cell(8, 1).font = date_font
+    status.cell(8, 1).number_format = 'yyyy-mm-dd'
+    status.cell(9, 1).value = 1234.5
+    status.cell(9, 1).font = date_font
+    status.cell(9, 1).number_format = '$#,##0.00'
+    status.cell(10, 1).value = 'Trailing note'
+    status.cell(10, 1).fill = PatternFill('solid', fg_color='FF0000')
+
+    repeated = book.create_sheet('Repeated')
+    for row in range(1, 6):
+        for column in range(1, 4):
+            cell = repeated.cell(row, column)
+            cell.value = 'value' if column == 1 else row * column
+            cell.font = header_font
+            cell.border = header_border
+            cell.alignment = Alignment(horizontal='right')
+    return book
+
+
+def test_xlsx_cached_styles_match_uncached_renderer_byte_for_byte(tmp_path):
+    definition = _rich_definition()
+    cached_path = tmp_path / 'cached.xlsx'
+    uncached_path = tmp_path / 'uncached.xlsx'
+    render_xlsx(definition).save(cached_path)
+    _render_without_style_cache(definition).save(uncached_path)
+
+    with ZipFile(cached_path) as cached, ZipFile(uncached_path) as uncached:
+        assert sorted(cached.namelist()) == sorted(uncached.namelist())
+        for name in sorted(cached.namelist()):
+            if name == 'docProps/core.xml':
+                continue
+            assert cached.read(name) == uncached.read(name), name
+
+    saved = load_workbook(cached_path)
+    assert saved.sheetnames == ['Usage', 'Data collection status', 'Repeated']
+    assert saved['Usage']['C3'].number_format == '$#,##0.00'
+    assert saved['Data collection status']['A2'].number_format == 'yyyy-mm-dd h:mm:ss'
+    assert saved['Data collection status']['A3'].number_format == 'yyyy-mm-dd'
+    assert saved['Data collection status']['A9'].number_format == '$#,##0.00'

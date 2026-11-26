@@ -1,5 +1,7 @@
 """Render a report definition as an openpyxl workbook."""
 
+import copy
+
 import numpy as np
 
 from openpyxl import Workbook
@@ -59,6 +61,31 @@ def _apply_styles(cell, source, fonts, fills, borders, alignments):
         cell.alignment = alignments[source.alignment]
 
 
+def _has_presentation(source):
+    return (
+        source.font is not None
+        or source.fill is not None
+        or source.border is not None
+        or source.alignment is not None
+        or source.number_format is not None
+    )
+
+
+def _style_key(cell, source):
+    """Identify a resolved cell style independently of openpyxl's tables.
+
+    ``_set_value`` gives date-like values an implicit number format, so the
+    already-resolved ``numFmtId`` is part of the key when the definition does
+    not name an explicit format.  Otherwise a string cell and a datetime cell
+    sharing the same font would collide and lose their distinct formats.
+    """
+    number_format = source.number_format
+    if number_format is None:
+        style = getattr(cell, '_style', None)
+        number_format = style.numFmtId if style is not None else 0
+    return (source.font, source.fill, source.border, source.alignment, number_format)
+
+
 def _apply_dimensions(ws, sheet):
     for column, dimension in sheet.column_dimensions.items():
         if dimension.width is not None:
@@ -72,6 +99,11 @@ def render(definition):
     workbook = Workbook()
     workbook.remove(workbook.active)
     fonts, fills, borders, alignments = {}, {}, {}, {}
+    # openpyxl keeps its font/fill/border/alignment/number-format tables on the
+    # workbook, so a resolved _style can be reused for every cell in the
+    # workbook that shares the same presentation.  Assigning the attributes on
+    # every cell hashes each style object on every assignment.
+    style_cache = {}
     for sheet in definition.worksheets:
         ws = workbook.create_sheet(sheet.title)
         for start_row, start_column, end_row, end_column in sheet.merges:
@@ -80,8 +112,19 @@ def render(definition):
             cell = ws.cell(source.row, source.column)
             if source.value is not None:
                 _set_value(cell, source.value)
+            if not _has_presentation(source):
+                continue
+            key = _style_key(cell, source)
+            cached = style_cache.get(key)
+            if cached is not None and hasattr(cell, '_style'):
+                # Each cell gets its own StyleArray: openpyxl mutates the array
+                # in place when a style is reassigned later.
+                cell._style = copy.copy(cached)
+                continue
             _apply_styles(cell, source, fonts, fills, borders, alignments)
             if source.number_format is not None:
                 cell.number_format = source.number_format
+            if hasattr(cell, '_style') and cell._style is not None:
+                style_cache[key] = copy.copy(cell._style)
         _apply_dimensions(ws, sheet)
     return workbook

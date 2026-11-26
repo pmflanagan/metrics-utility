@@ -57,7 +57,15 @@ class ReportRenewalGuidance(Base):
         host_metric_dataframe = self.dataframes['host_metric']
 
         host_metric_dataframe['days_automated'] = (host_metric_dataframe['last_automation'] - host_metric_dataframe['first_automation']).dt.days
-        host_metric_dataframe['days_automated'] = host_metric_dataframe['days_automated'].apply(lambda x: max(0, x))
+        # `max(0, x)` parity: negative days and NaN (NaT-derived) days become 0. The elementwise
+        # version returned an integer 0 for both, so pandas inferred int64 whenever no positive
+        # float value remained - preserve that dtype too.
+        days_automated = host_metric_dataframe['days_automated']
+        positive_days = days_automated > 0
+        clipped_days = days_automated.where(positive_days, 0)
+        if days_automated.dtype.kind == 'f' and len(days_automated) and not positive_days.any():
+            clipped_days = clipped_days.astype('int64')
+        host_metric_dataframe['days_automated'] = clipped_days
 
         ephemeral_usage_dataframe = None
         if self.ephemeral_days:

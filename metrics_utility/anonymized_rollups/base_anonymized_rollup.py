@@ -1,6 +1,41 @@
 """Base class for all anonymized rollup processors."""
 
+import math
+
+import numpy as np
 import pandas as pd
+
+from pandas.api.types import (
+    is_bool_dtype,
+    is_datetime64_any_dtype,
+    is_float_dtype,
+    is_integer_dtype,
+    is_object_dtype,
+    is_string_dtype,
+    is_timedelta64_dtype,
+)
+
+
+# Floats whose magnitude reaches this limit can no longer be represented exactly
+# as int64, so they need a (rare) Python-int fallback to stay exact.
+_MAX_EXACT_FLOAT_INT = 2**53
+
+
+def _id_value_to_string(value):
+    """Convert a single identifier value to its canonical string form.
+
+    Mirrors the historical per-element rule used by
+    ``_convert_id_columns_to_strings``: integral numbers become
+    ``str(int(value))`` (``bool`` is an ``int`` subclass, so ``True`` -> ``'1'``),
+    while everything else (strings, ``None``, ``NaN``/``NA``, non-integral
+    floats, arbitrary objects) is returned unchanged. ``inf`` is also returned
+    unchanged instead of raising ``OverflowError``.
+    """
+    if isinstance(value, int):
+        return str(int(value))
+    if isinstance(value, float) and pd.notna(value) and math.isfinite(value) and value == int(value):
+        return str(int(value))
+    return value
 
 
 class BaseAnonymizedRollup:
@@ -10,6 +45,10 @@ class BaseAnonymizedRollup:
     raw collector data is aggregated into a JSON structure suitable for
     inclusion in the anonymized daily report.
     """
+
+    # Identifier columns converted to strings before aggregation/JSON output.
+    # Subclasses may extend this tuple with additional ID columns.
+    _ID_COLUMNS = ('id', 'job_id', 'host_id', 'job_remote_id')
 
     def __init__(self, rollup_name: str):
         """Initialize the rollup with a name identifier.
@@ -41,20 +80,82 @@ class BaseAnonymizedRollup:
 
         return pd.concat([dataframe_all, dataframe_new], ignore_index=True)
 
+    @staticmethod
+    def _convert_id_column_to_strings(series):
+        """Vectorised equivalent of applying ``_id_value_to_string`` element-wise.
+
+        Behaviours preserved from the previous ``.apply(lambda ...)`` implementation:
+
+        * integer dtypes (``int64``, ``int32``, nullable ``Int64``/``UInt64``) ->
+          ``str(int(value))`` for every non-null value, nulls untouched;
+        * float dtypes -> whole finite numbers become int strings, ``NaN`` and
+          fractional floats are left as-is;
+        * string dtypes -> already strings, returned untouched;
+        * datetime/timedelta dtypes -> returned untouched;
+        * mixed ``object`` columns -> per-value conversion, so numeric strings
+          such as ``'007'`` (leading zeros) are left untouched.
+
+        Args:
+            series: A pandas Series holding identifier values.
+
+        Returns:
+            A Series where integral numeric values have been converted to strings.
+        """
+        dtype = series.dtype
+
+        # String-backed columns are already in the target form; nothing to do.
+        # ``object`` columns are handled below because they may mix types.
+        if is_string_dtype(dtype) and not is_object_dtype(dtype):
+            return series
+
+        # Datetime-like columns cannot hold numeric IDs; leave them untouched.
+        if is_datetime64_any_dtype(dtype) or is_timedelta64_dtype(dtype):
+            return series
+
+        # Integer columns (including nullable Int*/UInt*) only hold integral values.
+        if is_integer_dtype(dtype) and not is_bool_dtype(dtype):
+            if not series.isna().any():
+                return series.astype(str).astype(object)
+
+            mask = series.notna()
+            result = series.astype(object)
+            if mask.any():
+                result.loc[mask] = series[mask].astype(str)
+            return result
+
+        if is_float_dtype(dtype):
+            result = series.astype(object)
+            # Work on a plain numpy float array so pd.NA/Nullable masks cannot leak
+            # into the boolean masks used for assignment.
+            values = series.to_numpy(dtype='float64', na_value=np.nan)
+            finite = np.isfinite(values)
+            whole = pd.Series(finite & (values % 1 == 0), index=series.index)
+            if whole.any():
+                safe = whole & pd.Series(np.abs(values) < _MAX_EXACT_FLOAT_INT, index=series.index)
+                if safe.any():
+                    result.loc[safe] = values[safe.to_numpy()].astype(np.int64).astype(str)
+                # Floats beyond the int64 range need Python ints to stay exact.
+                for pos in np.flatnonzero((whole & ~safe).to_numpy()):
+                    result.iloc[pos] = str(int(values[pos]))
+            return result
+
+        # Mixed object columns (or unusual dtypes such as bool): convert value by
+        # value, which keeps leading-zero strings and other objects intact.
+        return pd.Series([_id_value_to_string(value) for value in series], index=series.index, dtype=object)
+
     def _convert_id_columns_to_strings(self, dataframe):
         """Convert ID columns to strings at the beginning of prepare().
 
-        Converts numeric ID columns (id, job_id, host_id, job_remote_id) to strings
-        to ensure consistent JSON serialization.
+        Converts numeric ID columns (see ``_ID_COLUMNS``) to strings to ensure
+        consistent JSON serialization.
         """
         if dataframe.empty:
             return dataframe
 
-        id_columns = ['id', 'job_id', 'host_id', 'job_remote_id']
-        for col in id_columns:
+        for col in self._ID_COLUMNS:
             if col in dataframe.columns:
                 # Convert numeric IDs to strings, preserving NaN values
-                dataframe[col] = dataframe[col].apply(lambda x: str(int(x)) if pd.notna(x) and isinstance(x, (int, float)) and x == int(x) else x)
+                dataframe[col] = self._convert_id_column_to_strings(dataframe[col])
 
         return dataframe
 

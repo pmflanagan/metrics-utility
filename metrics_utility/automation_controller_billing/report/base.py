@@ -364,8 +364,9 @@ class Base:
         header_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX, bold=True)
         value_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX)
 
-        # Extract infrastructure facts from indirect nodes
-        indirect_nodes = dataframe[dataframe['managed_node_type'] == INDIRECT].copy()
+        # Extract infrastructure facts from indirect nodes. Only the two columns
+        # used below are selected, so the caller's frame is not copied or mutated.
+        indirect_nodes = dataframe.loc[dataframe['managed_node_type'] == INDIRECT, ['host_name', 'facts']]
 
         if indirect_nodes.empty:
             # If no indirect nodes, show empty message
@@ -406,11 +407,24 @@ class Base:
                     pass
             return {'infra_type': 'Unknown', 'infra_bucket': 'Unknown', 'device_type': 'Unknown'}
 
-        # Extract infrastructure information
-        infra_info = indirect_nodes['facts'].apply(extract_infra_info)
-        indirect_nodes['infra_type'] = infra_info.apply(lambda x: x['infra_type'])
-        indirect_nodes['infra_bucket'] = infra_info.apply(lambda x: x['infra_bucket'])
-        indirect_nodes['device_type'] = infra_info.apply(lambda x: x['device_type'])
+        # Unpack all three fact values in a single pass over the facts column.
+        infra_types = []
+        infra_buckets = []
+        device_types = []
+        for facts in indirect_nodes['facts']:
+            info = extract_infra_info(facts)
+            infra_types.append(info['infra_type'])
+            infra_buckets.append(info['infra_bucket'])
+            device_types.append(info['device_type'])
+
+        indirect_nodes = pd.DataFrame(
+            {
+                'host_name': indirect_nodes['host_name'].to_numpy(),
+                'infra_type': infra_types,
+                'infra_bucket': infra_buckets,
+                'device_type': device_types,
+            }
+        )
 
         # Group by infra_type, infra_bucket, and device_type
         agg_dict = {
@@ -622,6 +636,8 @@ class Base:
             return None
 
         records = []
+        # The same FQCNs repeat across hosts, so resolve each one at most once.
+        collection_names_by_fqcn = {}
         for row in indirects.itertuples(index=False):
             events = getattr(row, 'events', None)
             if not events:
@@ -629,7 +645,15 @@ class Base:
 
             collection_names = set()
             for fqcn in events:
-                collection_name = DataframeContentUsage.extract_collection_name(fqcn)
+                if not isinstance(fqcn, str):
+                    # extract_collection_name returns None for these and they may
+                    # not even be hashable, so don't put them in the cache.
+                    continue
+                if fqcn in collection_names_by_fqcn:
+                    collection_name = collection_names_by_fqcn[fqcn]
+                else:
+                    collection_name = DataframeContentUsage.extract_collection_name(fqcn)
+                    collection_names_by_fqcn[fqcn] = collection_name
                 if collection_name is not None:
                     collection_names.add(collection_name)
 

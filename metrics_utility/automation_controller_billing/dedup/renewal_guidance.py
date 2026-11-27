@@ -36,6 +36,54 @@ class BaseDedupRenewal:
             return dupes['hostname'].iat[0]
         return dupes.sort_values(by=['deleted', 'last_automation'], ascending=[True, False])['hostname'].iloc[0]
 
+    # Columns read by _build_deduped_record. Keeping them in one place ensures the
+    # singleton fast path below stays in sync with the general implementation.
+    DEDUPED_RECORD_COLUMNS = (
+        'hostname',
+        'ansible_host_variable',
+        'ansible_product_serial',
+        'ansible_machine_id',
+        'deleted',
+        'first_automation',
+        'last_automation',
+        'automated_counter',
+        'deleted_counter',
+        'last_deleted',
+    )
+
+    def _record_columns(self):
+        """Positional accessors for :attr:`DEDUPED_RECORD_COLUMNS`."""
+        return {column: self.dataframe[column].array for column in self.DEDUPED_RECORD_COLUMNS}
+
+    def _build_singleton_record(self, columns, position):
+        """Build the deduped record for a duplicate group of exactly one row.
+
+        ``min``/``max``/``sum`` over a one-element column return that element, so
+        :meth:`_build_deduped_record` reduces to reading the row's scalars. Doing
+        that directly avoids a one-row DataFrame slice plus one Series reduction
+        per field and yields identical values (and therefore an identical frame).
+        """
+        hostname = columns['hostname'][position]
+        hostname_present = not pd.isna(hostname)
+        deleted = columns['deleted'][position]
+
+        return {
+            'hostname': hostname,
+            'hostmetric_record_count': 1 if hostname_present else 0,
+            'hostmetric_record_count_active': 1 if not deleted and hostname_present else 0,
+            'hostmetric_record_count_deleted': 1 if bool(deleted) and hostname_present else 0,
+            'hostnames': self.stringify({hostname}),
+            'ansible_host_variables': self.stringify({columns['ansible_host_variable'][position]}),
+            'ansible_product_serials': self.stringify({columns['ansible_product_serial'][position]}),
+            'ansible_machine_ids': self.stringify({columns['ansible_machine_id'][position]}),
+            'deleted': deleted,
+            'first_automation': columns['first_automation'][position],
+            'last_automation': columns['last_automation'][position],
+            'automated_counter': columns['automated_counter'][position],
+            'deleted_counter': columns['deleted_counter'][position],
+            'last_deleted': columns['last_deleted'][position],
+        }
+
     def _build_deduped_record(self, dupes, latest_hostname, dupes_clean=None):
         """Build a standardized deduped record from duplicate group."""
         if dupes_clean is None:
@@ -90,6 +138,7 @@ class DedupRenewal(BaseDedupRenewal):
         index_labels = self.dataframe.index.tolist()
         index_values = self.dataframe['index'].to_numpy()
         may_have_duplicate_rows = not self.dataframe['index'].is_unique
+        record_columns = self._record_columns()
 
         iterations = int(self.extra_params['report_renewal_guidance_dedup_iterations'])
 
@@ -134,11 +183,16 @@ class DedupRenewal(BaseDedupRenewal):
                             seen.add(match)
                             positions.append(match)
 
+            processed_dupes_index.update(index_values[positions])
+            if len(positions) == 1:
+                # Nothing to aggregate: read the single row directly.
+                deduped_list.append(self._build_singleton_record(record_columns, positions[0]))
+                continue
+
             dupes = self.dataframe.iloc[positions]
             if iterations > 0 and may_have_duplicate_rows:
                 dupes = dupes.drop_duplicates()
 
-            processed_dupes_index.update(index_values[positions])
             latest_hostname = self._get_latest_hostname(dupes)
             deduped_list.append(self._build_deduped_record(dupes, latest_hostname))
 
@@ -179,6 +233,7 @@ class DedupRenewalHostname(BaseDedupRenewal):
         normalized_positions = self._value_positions(self.dataframe['normalized_hostname'])
         normalized_values = self.dataframe['normalized_hostname'].to_numpy()
         index_labels = self.dataframe.index.tolist()
+        record_columns = self._record_columns()
 
         deduped_list = []
         processed_dupes_index = set()
@@ -187,7 +242,14 @@ class DedupRenewalHostname(BaseDedupRenewal):
             if index_labels[position] in processed_dupes_index:
                 continue
 
-            dupes = self.dataframe.iloc[normalized_positions.get(normalized_values[position], [])]
+            positions = normalized_positions.get(normalized_values[position], [])
+            if len(positions) == 1:
+                # Nothing to aggregate: read the single row directly.
+                processed_dupes_index.add(self.dataframe['index'].iat[positions[0]])
+                deduped_list.append(self._build_singleton_record(record_columns, positions[0]))
+                continue
+
+            dupes = self.dataframe.iloc[positions]
             processed_dupes_index.update(dupes['index'])
 
             latest_hostname = self._get_latest_hostname(dupes)

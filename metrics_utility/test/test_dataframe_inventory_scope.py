@@ -89,7 +89,7 @@ def test_build_dataframe_combines_serials_across_batches():
     engine = DataframeInventoryScope(
         extractor=extractor,
         month=date(2026, 1, 1),
-        extra_params={'since_date': date(2026, 1, 1), 'until_date': date(2026, 1, 1)},
+        extra_params={'since_date': date(2026, 1, 1), 'until_date': date(2026, 1, 1), 'deduplicator': 'ccsp-experimental'},
     )
 
     result = engine.build_dataframe()
@@ -99,13 +99,13 @@ def test_build_dataframe_combines_serials_across_batches():
     assert result.iloc[0]['serials'] == {'serial-a/machine-a', 'serial-b/machine-b'}
 
 
-def _engine_for_batches(batches):
+def _engine_for_batches(batches, deduplicator=None):
     extractor = MagicMock()
     extractor.iter_batches.return_value = iter(batches)
     return DataframeInventoryScope(
         extractor=extractor,
         month=date(2026, 1, 1),
-        extra_params={'since_date': date(2026, 1, 1), 'until_date': date(2026, 1, 1)},
+        extra_params={'since_date': date(2026, 1, 1), 'until_date': date(2026, 1, 1), 'deduplicator': deduplicator},
     )
 
 
@@ -146,7 +146,7 @@ def test_build_dataframe_matches_direct_helper_results(raw):
     expected_serial = serial_from_facts(raw)
     expected_facts = merge_json_sets([raw])
 
-    result = _engine_for_batches(_single_batch([raw])).build_dataframe()
+    result = _engine_for_batches(_single_batch([raw]), deduplicator='ccsp-experimental').build_dataframe()
 
     assert result.iloc[0]['serials'] == {expected_serial}
     assert result.iloc[0]['canonical_facts'] == expected_facts
@@ -165,9 +165,53 @@ def test_build_dataframe_nested_facts_are_merged_across_batches():
     batch1 = _single_batch(['{"tags":{"a":[1,2]},"ansible_product_serial":"s","ansible_machine_id":"m"}'])
     batch2 = _single_batch(['{"tags":{"a":[1,2]},"ansible_product_serial":"s","ansible_machine_id":"m"}'])
 
-    result = _engine_for_batches(batch1 + batch2).build_dataframe()
+    result = _engine_for_batches(batch1 + batch2, deduplicator='ccsp-experimental').build_dataframe()
 
     assert result.iloc[0]['serials'] == {'s/m'}
     canonical_facts = result.iloc[0]['canonical_facts']
     assert set(canonical_facts) == {'ansible_product_serial', 'ansible_machine_id', 'tags'}
     assert canonical_facts['tags'] == set(merge_json_sets([{'t': {'a': [1, 2]}}])['t'])
+
+
+@pytest.mark.parametrize('deduplicator', [None, 'ccsp'])
+def test_build_dataframe_skips_serial_parsing_without_experimental_dedup(monkeypatch, deduplicator):
+    """Serial keys are only consumed by experimental dedup, so skip the parse otherwise."""
+    calls = []
+    real_serial_from_facts = serial_from_facts
+
+    def spy(canonical_facts):
+        calls.append(canonical_facts)
+        return real_serial_from_facts(canonical_facts)
+
+    monkeypatch.setattr(
+        'metrics_utility.automation_controller_billing.dataframe_engine.dataframe_inventory_scope.serial_from_facts',
+        spy,
+    )
+
+    raw = '{"ansible_product_serial":"s1","ansible_machine_id":"m1"}'
+    result = _engine_for_batches(_single_batch([raw]), deduplicator=deduplicator).build_dataframe()
+
+    assert calls == []
+    assert result.iloc[0]['serials'] == {None}
+    assert result.iloc[0]['host_names_before_dedup'] == {None}
+
+
+def test_build_dataframe_parses_serials_with_experimental_dedup(monkeypatch):
+    calls = []
+    real_serial_from_facts = serial_from_facts
+
+    def spy(canonical_facts):
+        calls.append(canonical_facts)
+        return real_serial_from_facts(canonical_facts)
+
+    monkeypatch.setattr(
+        'metrics_utility.automation_controller_billing.dataframe_engine.dataframe_inventory_scope.serial_from_facts',
+        spy,
+    )
+
+    raw = '{"ansible_product_serial":"s1","ansible_machine_id":"m1"}'
+    result = _engine_for_batches(_single_batch([raw]), deduplicator='ccsp-experimental').build_dataframe()
+
+    assert calls == [raw]
+    assert result.iloc[0]['serials'] == {'s1/m1'}
+    assert result.iloc[0]['host_names_before_dedup'] == {'host'}

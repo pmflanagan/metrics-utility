@@ -689,3 +689,54 @@ class TestDedupCCSPExperimentalLazy:
         dedup = DedupCCSP(engines, extra_params={}, experimental=True)
         result = dedup.run()
         assert 'host_names_before_dedup' in result['job_host_summary'].columns
+
+    def test_scope_dataframe_is_a_narrow_main_host_view(self):
+        """The JHS dedup only needs host_name/canonical_facts/facts, so don't copy the frame."""
+        scope_calls = []
+
+        class RecordingEngine(FakeEngine):
+            def dedup(self, df, mapping, **kwargs):
+                scope_calls.append(kwargs.get('scope_dataframe'))
+                return df
+
+        main_host_df = pd.DataFrame(
+            {
+                'host_name': ['h1', 'h2'],
+                'serials': [['serial1'], ['serial1']],
+                'canonical_facts': [{'a': 1}, {'b': 2}],
+                'facts': [{'f': 1}, {'f': 2}],
+                'organizations': [{'org'}, {'org'}],
+            }
+        )
+        engines = {
+            'main_host': FakeEngine(main_host_df),
+            'job_host_summary': RecordingEngine(pd.DataFrame({'host_name': ['h1']})),
+            'main_jobevent': FakeEngine(pd.DataFrame({'host_name': ['h1']})),
+        }
+        dedup = DedupCCSP(engines, extra_params={}, experimental=True)
+        result = dedup.run()
+
+        assert len(scope_calls) == 1
+        scope_dataframe = scope_calls[0]
+        assert list(scope_dataframe.columns) == ['host_name', 'canonical_facts', 'facts']
+        # The main_host frame must still carry its original columns (it is deduped, not stripped).
+        assert 'serials' in result['main_host'].columns
+        assert set(main_host_df.columns) == {'host_name', 'serials', 'canonical_facts', 'facts', 'organizations'}
+
+    def test_scope_dataframe_is_none_without_facts_columns(self):
+        """Engines whose main_host has no canonical_facts/facts must not get a KeyError."""
+        scope_calls = []
+
+        class RecordingEngine(FakeEngine):
+            def dedup(self, df, mapping, **kwargs):
+                scope_calls.append(kwargs.get('scope_dataframe'))
+                return df
+
+        engines = {
+            'main_host': FakeEngine(pd.DataFrame({'host_name': ['h1'], 'serials': [['s1']]})),
+            'job_host_summary': RecordingEngine(pd.DataFrame({'host_name': ['h1']})),
+        }
+        dedup = DedupCCSP(engines, extra_params={}, experimental=True)
+        dedup.run()
+
+        assert scope_calls == [None]

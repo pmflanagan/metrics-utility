@@ -78,15 +78,16 @@ class DataframeInventoryScope(Base):
                 billing_data['last_automation'] = pd.to_datetime(billing_data['last_automation'], format='ISO8601').dt.tz_localize(None)
 
                 # Keep canonical_facts as the raw JSON strings; group() decodes
-                # them via merge_json_sets(), which accepts strings or dicts, so
-                # only the serial key needs a per-row parse here.
-                billing_data['serial'] = billing_data['canonical_facts'].map(serial_from_facts)
-
+                # them via merge_json_sets(), which accepts strings or dicts.
+                # Serial keys are only consumed by experimental deduplication
+                # (DedupCCSP.df_to_mapping), so skip the per-row parse otherwise.
                 experimental_dedup = self.extra_params.get('deduplicator') == 'ccsp-experimental'
                 if experimental_dedup:
+                    billing_data['serial'] = billing_data['canonical_facts'].map(serial_from_facts)
                     billing_data['host_names_before_dedup'] = billing_data['host_name']
                 else:
-                    # Always create the column for consistent structure, but keep it empty when dedup is not enabled
+                    # Always create the columns for consistent structure, but keep them empty when dedup is not enabled
+                    billing_data['serial'] = None
                     billing_data['host_names_before_dedup'] = None
 
                 ################################

@@ -151,16 +151,18 @@ class DedupCCSP:
         if dedup_info is None or dedup_info.empty:
             return result
 
-        dedup_info_copy = dedup_info.copy()
-        mapping = self.df_to_mapping(dedup_info_copy)
-        if 'serials' in dedup_info_copy.columns:
-            del dedup_info_copy['serials']
+        # df_to_mapping() only reads host_name/serials, and the job-host-summary
+        # dedup only reads host_name/canonical_facts/facts; pass views instead of
+        # copying the whole main_host frame just to drop 'serials'.
+        mapping = self.df_to_mapping(dedup_info)
+        scope_columns = ['host_name', 'canonical_facts', 'facts']
+        scope_dataframe = dedup_info[scope_columns] if all(column in dedup_info.columns for column in scope_columns) else None
 
         for name in ['job_host_summary', 'main_jobevent', 'main_host']:
             df = result.get(name)
             if df is not None and not df.empty:
                 if name == 'job_host_summary':
-                    result[name] = self.dataframes[name].dedup(df, mapping, scope_dataframe=dedup_info_copy)
+                    result[name] = self.dataframes[name].dedup(df, mapping, scope_dataframe=scope_dataframe)
                 else:
                     result[name] = self.dataframes[name].dedup(df, mapping)
 

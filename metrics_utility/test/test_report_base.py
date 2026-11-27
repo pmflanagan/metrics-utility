@@ -6,6 +6,7 @@ DataFrame – no database or file I/O required.
 
 import pandas as pd
 
+from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_content_usage import DataframeContentUsage
 from metrics_utility.automation_controller_billing.report.base import Base
 from metrics_utility.automation_controller_billing.report.definition import Workbook
 from metrics_utility.metric_utils import INDIRECT as _INDIRECT
@@ -735,6 +736,30 @@ class TestBuildDataSectionInfrastructureSummary:
         end_row = r._build_data_section_infrastructure_summary(1, ws, df)
         assert end_row > 1
 
+    def test_does_not_mutate_input_dataframe(self):
+        df = _infra_df_with_indirect()
+        original = df.copy()
+
+        r = _report()
+        ws = _make_ws(r)
+        r._build_data_section_infrastructure_summary(1, ws, df)
+
+        pd.testing.assert_frame_equal(df, original)
+
+    def test_single_pass_extraction_matches_row_by_row_parsing(self):
+        """The batched unpack must produce the same rows as parsing facts one by one."""
+        r = _report()
+        ws = _make_ws(r)
+        end_row = r._build_data_section_infrastructure_summary(1, ws, _infra_df_with_indirect())
+
+        written = [
+            (ws.cell(row=row, column=3).value, ws.cell(row=row, column=4).value, ws.cell(row=row, column=5).value)
+            for row in range(2, end_row)
+            if ws.cell(row=row, column=3).value is not None
+        ]
+        # (Device Type, Unique Nodes, Total Nodes) in hierarchical sort order.
+        assert written == [('Container', 1, 1), ('VM', 1, 1)]
+
 
 # ---------------------------------------------------------------------------
 # _build_data_section_usage_by_node
@@ -1177,6 +1202,57 @@ class TestBuildIndirectCollectionsLong:
     def test_output_columns_match_long_schema(self):
         result = _report()._build_indirect_collections_long(_indirects_df())
         assert list(result.columns) == Base.COLLECTIONS_LONG_COLUMNS
+
+    def test_extract_collection_name_is_cached_per_fqcn(self, monkeypatch):
+        calls = []
+        real_extract = DataframeContentUsage.extract_collection_name
+
+        def spy(fqcn):
+            calls.append(fqcn)
+            return real_extract(fqcn)
+
+        monkeypatch.setattr(DataframeContentUsage, 'extract_collection_name', staticmethod(spy))
+
+        df = pd.DataFrame(
+            {
+                'host_name': ['h1', 'h2', 'h3'],
+                'install_uuid': ['u1', 'u1', 'u1'],
+                'job_remote_id': ['j1', 'j2', 'j3'],
+                'task_runs': [1, 2, 3],
+                'events': [['col.a.m'], ['col.a.m', 'col.b.m'], ['col.a.m', 'not_a_fqcn']],
+            }
+        )
+
+        result = _report()._build_indirect_collections_long(df)
+
+        # Each distinct FQCN (including the unresolvable one) is resolved once.
+        assert calls == ['col.a.m', 'col.b.m', 'not_a_fqcn']
+        assert set(result['collection_name']) == {'col.a', 'col.b'}
+
+    def test_non_string_events_are_ignored_without_caching(self, monkeypatch):
+        calls = []
+        real_extract = DataframeContentUsage.extract_collection_name
+
+        def spy(fqcn):
+            calls.append(fqcn)
+            return real_extract(fqcn)
+
+        monkeypatch.setattr(DataframeContentUsage, 'extract_collection_name', staticmethod(spy))
+
+        df = pd.DataFrame(
+            {
+                'host_name': ['h1', 'h2'],
+                'install_uuid': ['u1', 'u1'],
+                'job_remote_id': ['j1', 'j2'],
+                'task_runs': [1, 2],
+                'events': [[None, 123, ['nested'], 'col.a.m'], [None, 123]],
+            }
+        )
+
+        result = _report()._build_indirect_collections_long(df)
+
+        assert calls == ['col.a.m']
+        assert set(result['collection_name']) == {'col.a'}
 
 
 # ---------------------------------------------------------------------------

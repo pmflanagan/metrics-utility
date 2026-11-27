@@ -26,6 +26,10 @@ from metrics_utility.automation_controller_billing.report.definition import (
 from metrics_utility.metric_utils import DIRECT, INDIRECT
 
 
+MISSING_ORGANIZATION_NAME = 'No organization name'
+"""Label used for rows whose ``organization_name`` is null (same as the dataframe engine)."""
+
+
 class ReportCCSPv2(Base):
     """XLSX report builder for the CCSPv2 billing report format.
 
@@ -223,17 +227,29 @@ class ReportCCSPv2(Base):
         return sheet_index
 
     def _add_organization_sheets(self, sheet_index, job_host_summary_dataframe):
-        organization_names = sorted(job_host_summary_dataframe['organization_name'].unique())
-        for organization_name in organization_names:
-            ws = self.add_sheet(organization_name, sheet_index, self.config['data_column_widths'])
-            if ws.title != organization_name:
+        # Group once instead of re-filtering the whole frame for every organization
+        # (O(organizations x rows)).  observed=True keeps the groups identical to
+        # .unique() for categorical columns.  Iterating the groupby result (rather
+        # than get_group()) keeps the null group usable: get_group() rejects NaN
+        # keys on some pandas versions.
+        groups = list(job_host_summary_dataframe.groupby('organization_name', dropna=False, sort=False, observed=True))
+        # Sheet order must stay alphabetical for named organizations.  Sorting the
+        # raw keys would raise TypeError on a mix of None/NaN and strings, so sort
+        # on a (is_missing, name) tuple and force the null group last.
+        groups.sort(key=lambda group: (pd.isna(group[0]), '' if pd.isna(group[0]) else group[0]))
+
+        for organization_name, organization_data in groups:
+            # Excel titles must be strings; use the same placeholder the dataframe
+            # engine assigns to rows without an organization.
+            sheet_title = MISSING_ORGANIZATION_NAME if pd.isna(organization_name) else organization_name
+            ws = self.add_sheet(sheet_title, sheet_index, self.config['data_column_widths'])
+            if ws.title != sheet_title:
                 cell = ws.cell(row=1, column=1)
-                cell.value = organization_name
+                cell.value = sheet_title
                 cell.font = Font(name=self.FONT, size=11, bold=True)
                 data_start_row = 2
             else:
                 data_start_row = 1
-            organization_data = job_host_summary_dataframe[job_host_summary_dataframe['organization_name'] == organization_name]
             self._build_data_section_usage_by_node(data_start_row, ws, organization_data, mode='by_organization')
             sheet_index += 1
         return sheet_index
@@ -516,37 +532,48 @@ class ReportCCSPv2(Base):
         header_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX, bold=True)
         value_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX)
 
-        dataframe['job_remote_id_install_uuid'] = list(zip(dataframe['job_remote_id'], dataframe['install_uuid']))
+        include_indirect = 'indirectly_managed_nodes' in self.optional_report_sheets()
+
+        # Mask host_name by node type once, then use plain 'nunique'/'count'
+        # aggregations instead of re-indexing the source frame for every group.
+        # The dict-backed frame references the source columns instead of copying
+        # them (copy=False), and agg() never writes, so the caller's dataframe
+        # stays untouched.
+        working_data = {
+            'organization_name': dataframe['organization_name'],
+            'task_runs': dataframe['task_runs'],
+            'job_remote_id_install_uuid': list(zip(dataframe['job_remote_id'], dataframe['install_uuid'])),
+            '_direct_host_name': dataframe['host_name'].where(dataframe['managed_node_type'] == DIRECT),
+        }
+        if include_indirect:
+            working_data['_indirect_host_name'] = dataframe['host_name'].where(dataframe['managed_node_type'] == INDIRECT)
+        working = pd.DataFrame(working_data, copy=False)
 
         agg_dict = {
             'job_runs': ('job_remote_id_install_uuid', 'nunique'),
             # Only count host_name if the managed_node_type is "DIRECT"
-            'host_runs_unique': ('host_name', lambda x: x[dataframe.loc[x.index, 'managed_node_type'] == DIRECT].nunique()),
-            'host_runs': ('host_name', lambda x: x[dataframe.loc[x.index, 'managed_node_type'] == DIRECT].count()),
+            'host_runs_unique': ('_direct_host_name', 'nunique'),
+            'host_runs': ('_direct_host_name', 'count'),
             'task_runs': ('task_runs', 'sum'),
         }
 
         # Add the INDIRECT aggregations only if the condition is met
-        if 'indirectly_managed_nodes' in self.optional_report_sheets():
-            agg_dict['indirect_host_runs_unique'] = ('host_name', lambda x: x[dataframe.loc[x.index, 'managed_node_type'] == INDIRECT].nunique())
-            agg_dict['indirect_host_runs'] = ('host_name', lambda x: x[dataframe.loc[x.index, 'managed_node_type'] == INDIRECT].count())
+        if include_indirect:
+            agg_dict['indirect_host_runs_unique'] = ('_indirect_host_name', 'nunique')
+            agg_dict['indirect_host_runs'] = ('_indirect_host_name', 'count')
 
         # Now pass this dictionary into .agg()
-        ccsp_report_dataframe = dataframe.groupby('organization_name', dropna=False).agg(**agg_dict)
+        ccsp_report_dataframe = working.groupby('organization_name', dropna=False).agg(**agg_dict)
 
         ccsp_report_dataframe = ccsp_report_dataframe.reset_index()
 
         # Build columns list dynamically
         columns = ['organization_name', 'job_runs', 'host_runs_unique', 'host_runs']
-        if 'indirectly_managed_nodes' in self.optional_report_sheets():
+        if include_indirect:
             columns.extend(['indirect_host_runs_unique', 'indirect_host_runs'])
         columns.append('task_runs')
 
         ccsp_report_dataframe = ccsp_report_dataframe.reindex(columns=columns)
-
-        if 'indirectly_managed_nodes' not in self.optional_report_sheets():
-            drop_cols = ['indirect_host_runs_unique', 'indirect_host_runs']
-            ccsp_report_dataframe.drop([col for col in drop_cols if col in ccsp_report_dataframe.columns], axis=1, inplace=True)
 
         rename_columns = {
             'organization_name': 'Organization name',

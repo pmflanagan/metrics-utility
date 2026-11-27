@@ -1029,6 +1029,158 @@ def test_na_and_empty_serials_are_cleaned_once(dedup_class):
     assert result.iloc[0]['ansible_machine_ids'] == ''
 
 
+########################################################################################
+# Singleton fast path: one-row duplicate groups must produce the exact same record as
+# the general _build_deduped_record() (which slices a one-row DataFrame and reduces
+# every column with min/max/sum/nunique).
+########################################################################################
+
+
+def _singleton_frame(**overrides):
+    row = {
+        'index': 0,
+        'hostname': 'host-a',
+        'ansible_host_variable': '10.0.0.1',
+        'ansible_product_serial': 'serial-1',
+        'ansible_machine_id': 'machine-1',
+        'deleted': False,
+        'first_automation': datetime(2023, 1, 1),
+        'last_automation': datetime(2023, 2, 1),
+        'automated_counter': 10,
+        'deleted_counter': 0,
+        'last_deleted': datetime(2023, 3, 1),
+    }
+    row.update(overrides)
+    return pd.DataFrame([row])
+
+
+def _assert_records_equal(actual, expected):
+    assert list(actual) == list(expected)
+    for key, expected_value in expected.items():
+        actual_value = actual[key]
+        if pd.isna(expected_value) and pd.isna(actual_value):
+            continue
+        assert actual_value == expected_value, key
+
+
+SINGLETON_OVERRIDES = [
+    {},
+    {'deleted': True},
+    {'ansible_host_variable': None},
+    {'ansible_host_variable': ''},
+    {'ansible_host_variable': np.nan},
+    {'ansible_product_serial': 'NA', 'ansible_machine_id': 'NA'},
+    {'ansible_product_serial': '', 'ansible_machine_id': ''},
+    {'ansible_product_serial': None, 'ansible_machine_id': None},
+    {'ansible_product_serial': np.nan, 'ansible_machine_id': np.nan},
+    {'last_deleted': pd.NaT},
+    {'deleted': True, 'last_deleted': pd.NaT, 'ansible_product_serial': ''},
+    {'first_automation': pd.NaT, 'last_automation': pd.NaT},
+    {'automated_counter': 0, 'deleted_counter': 0},
+    {'automated_counter': 3.5, 'deleted_counter': 1.5},
+    {'automated_counter': np.nan, 'deleted_counter': np.nan},
+    {'hostname': None},
+    {'hostname': np.nan, 'deleted': True},
+    {'hostname': '', 'ansible_product_serial': '', 'ansible_machine_id': ''},
+]
+
+
+@pytest.mark.parametrize('overrides', SINGLETON_OVERRIDES, ids=[str(index) for index in range(len(SINGLETON_OVERRIDES))])
+def test_singleton_record_matches_general_builder(overrides):
+    """The fast path must build the same dict (and frame) as the one-row general path."""
+    frame = _singleton_frame(**overrides)
+    dataframes = {'host_metric': Mock()}
+    dataframes['host_metric'].build_dataframe.return_value = frame
+    dedup = DedupRenewal(dataframes, {'report_renewal_guidance_dedup_iterations': '3'})
+    dedup._cleanup_null_values()
+
+    dupes = dedup.dataframe.iloc[[0]]
+    expected = dedup._build_deduped_record(dupes, dupes['hostname'].iat[0])
+    actual = dedup._build_singleton_record(dedup._record_columns(), 0)
+
+    _assert_records_equal(actual, expected)
+    pd.testing.assert_frame_equal(pd.DataFrame([actual]), pd.DataFrame([expected]))
+
+
+@pytest.mark.parametrize('deleted', [True, False], ids=['deleted', 'active'])
+def test_singleton_record_object_dtype_deleted_matches_general_builder(deleted):
+    """Object-dtype Python bools must be inverted logically, not bitwise.
+
+    ``~False`` is ``-1`` (truthy) and ``~True`` is ``-2`` (also truthy), so the old
+    fast path counted every row with a hostname as both active *and* deleted. The
+    expected values come from ``_build_deduped_record`` run on the equivalent
+    bool-dtype frame, because its ``dupes[~dupes['deleted']]`` mask needs real bools.
+    """
+    frame = _singleton_frame(deleted=deleted)
+    frame['deleted'] = frame['deleted'].astype(object)
+    assert frame['deleted'].dtype == object
+
+    dataframes = {'host_metric': Mock()}
+    dataframes['host_metric'].build_dataframe.return_value = frame
+    dedup = DedupRenewal(dataframes, {'report_renewal_guidance_dedup_iterations': '3'})
+    dedup._cleanup_null_values()
+
+    dupes = dedup.dataframe.astype({'deleted': bool}).iloc[[0]]
+    expected = dedup._build_deduped_record(dupes, dupes['hostname'].iat[0])
+    actual = dedup._build_singleton_record(dedup._record_columns(), 0)
+
+    _assert_records_equal(actual, expected)
+    assert actual['hostmetric_record_count_active'] == (0 if deleted else 1)
+    assert actual['hostmetric_record_count_deleted'] == (1 if deleted else 0)
+
+
+@pytest.mark.parametrize(
+    'dedup_class',
+    [DedupRenewal, DedupRenewalHostname],
+    ids=['renewal', 'hostname'],
+)
+def test_singleton_groups_use_fast_path(dedup_class):
+    """Groups of one row go through _build_singleton_record, never the general builder."""
+    frame = make_host_metric_frame(
+        [
+            ('host-a', '10.0.0.1', 'serial-1', 'machine-1', 1, False),
+            ('host-b', '', 'NA', '', 2, True),
+            ('host-c', np.nan, None, None, 3, False),
+            ('host-d', '10.0.0.4', 'serial-4', 'machine-4', 4, False),
+        ]
+    )
+    frame.loc[1, 'last_deleted'] = pd.NaT
+    positions = []
+
+    class Spy(dedup_class):
+        def _build_singleton_record(self, columns, position):
+            positions.append(position)
+            return super()._build_singleton_record(columns, position)
+
+        def _build_deduped_record(self, dupes, latest_hostname, dupes_clean=None):
+            raise AssertionError('all groups are singletons')
+
+    result = run_dedup(Spy, frame, 3)
+
+    assert positions == [0, 1, 2, 3]
+    assert len(result) == 4
+    pd.testing.assert_frame_equal(result, run_dedup(dedup_class, frame, 3))
+
+
+@pytest.mark.parametrize('dedup_class, legacy_class', DEDUP_CLASS_PAIRS, ids=['renewal', 'hostname', 'experimental'])
+def test_singleton_nat_last_deleted_matches_legacy(dedup_class, legacy_class):
+    """NaT last_deleted values must stay NaT through the singleton fast path."""
+    frame = make_host_metric_frame(
+        [
+            ('host-a', None, None, None, 1, False),
+            ('host-b', '', 'NA', '', 2, True),
+            ('host-c', '10.0.0.1', 'serial-1', 'machine-1', 3, False),
+        ]
+    )
+    frame['last_deleted'] = pd.NaT
+
+    expected = run_dedup(legacy_class, frame, 3)
+    actual = run_dedup(dedup_class, frame, 3)
+
+    pd.testing.assert_frame_equal(actual, expected)
+    assert actual['last_deleted'].isna().all()
+
+
 class TestReportDaysAutomated:
     """`days_automated` must keep the exact values and dtype of the removed elementwise max(0, x)."""
 

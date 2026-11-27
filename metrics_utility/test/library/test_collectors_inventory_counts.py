@@ -11,6 +11,10 @@ def _make_mock_db():
     return mock_db, mock_cursor
 
 
+def _queries(mock_cursor):
+    return [call.args[0] for call in mock_cursor.execute.call_args_list]
+
+
 def test_inventory_counts_basic():
     """Test inventory_counts collector basic functionality."""
     mock_db = MagicMock()
@@ -135,3 +139,72 @@ def test_inventory_counts_only_smart():
     assert result[5]['kind'] == 'smart'
     assert result[5]['sources'] == 0
     assert result[5]['source_list'] == []
+
+
+def test_inventory_counts_inventory_query_pre_aggregates_hosts_and_sources():
+    """Test the inventory query aggregates hosts/sources before joining."""
+    mock_db, mock_cursor = _make_mock_db()
+    mock_cursor.fetchall.side_effect = [[], []]
+
+    inventory_counts(db=mock_db).gather()
+
+    query = _queries(mock_cursor)[0]
+
+    assert 'WITH host_counts AS' in query
+    assert 'SELECT inventory_id, COUNT(*) AS num_hosts' in query
+    assert 'FROM main_host' in query
+    assert 'source_counts AS' in query
+    assert 'SELECT inventory_id, COUNT(*) AS num_sources' in query
+    assert 'FROM main_inventorysource' in query
+    assert 'LEFT JOIN host_counts' in query
+    assert 'ON host_counts.inventory_id = main_inventory.id' in query
+    assert 'LEFT JOIN source_counts' in query
+    assert 'ON source_counts.inventory_id = main_inventory.id' in query
+    assert 'COALESCE(host_counts.num_hosts, 0) AS num_hosts' in query
+    assert 'COALESCE(source_counts.num_sources, 0) AS num_sources' in query
+    assert "WHERE main_inventory.kind = ''" in query
+    # The old cross-product shape must be gone
+    assert 'COUNT(DISTINCT main_host.id)' not in query
+    assert 'COUNT(DISTINCT main_inventorysource.unifiedjobtemplate_ptr_id)' not in query
+    assert 'GROUP BY main_inventory.id' not in query
+
+
+def test_inventory_counts_multiple_hosts_and_sources_do_not_inflate_counts():
+    """Test many hosts and sources report exact counts, not a cross product."""
+    mock_db, mock_cursor = _make_mock_db()
+
+    mock_cursor.fetchall.side_effect = [
+        # 3 hosts and 2 sources for one inventory; a cross product would
+        # previously risk over-counting if DISTINCT were dropped.
+        [(1, 'Production', '', 3, 2)],
+        [
+            (1, 'Source A', 'ec2', 2),
+            (1, 'Source B', 'gce', 1),
+        ],
+        [],
+    ]
+
+    result = inventory_counts(db=mock_db).gather()
+
+    assert result[1]['hosts'] == 3
+    assert result[1]['sources'] == 2
+    assert [source['num_hosts'] for source in result[1]['source_list']] == [2, 1]
+    assert sum(source['num_hosts'] for source in result[1]['source_list']) == 3
+
+
+def test_inventory_counts_source_query_limits_to_normal_inventories():
+    """Test the source-details query joins and filters to normal inventories."""
+    mock_db, mock_cursor = _make_mock_db()
+    mock_cursor.fetchall.side_effect = [
+        [(1, 'Production', '', 1, 1)],
+        [(1, 'Source A', 'ec2', 1)],
+        [],
+    ]
+
+    inventory_counts(db=mock_db).gather()
+
+    source_query = _queries(mock_cursor)[1]
+
+    assert 'JOIN main_inventory' in source_query
+    assert 'ON main_inventory.id = main_inventorysource.inventory_id' in source_query
+    assert "WHERE main_inventory.kind = ''" in source_query

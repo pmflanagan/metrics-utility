@@ -216,6 +216,51 @@ def date_where(field, since, until):
     return 'true'
 
 
+def _host_vars_case(field):
+    """Return the SELECT expression extracting *field* from pre-parsed host variables."""
+    return (
+        f"CASE WHEN parsed.is_valid_json THEN parsed.vars->>'{field}' "
+        f"ELSE metrics_utility_parse_yaml_field(main_host.variables, '{field}') END AS {field}"
+    )
+
+
+def host_vars_lateral_sql(fields):
+    """Return a ``LEFT JOIN LATERAL (...) AS host_vars ON TRUE`` SQL fragment.
+
+    ``main_host.variables`` holds YAML or JSON text, so the validity check and
+    JSONB cast are evaluated once per row and shared by every extracted field.
+    ``LEFT JOIN`` + ``ON TRUE`` keeps the enclosing row when the lateral yields
+    nothing (e.g. a ``LEFT JOIN main_host`` that matched no host), producing one
+    all-NULL row instead of dropping it.
+
+    Args:
+        fields: Ansible variable names to extract as ``host_vars.<field>``
+            (hardcoded column names, never user input).
+
+    Returns:
+        SQL fragment joining the lateral as ``host_vars``.
+    """
+    for field in fields:
+        if not field.isascii() or not field.isidentifier():
+            raise ValueError(f'host_vars_lateral_sql: invalid field name {field!r}')
+
+    columns = ',\n                '.join(_host_vars_case(field) for field in fields)
+
+    return f"""\
+        LEFT JOIN LATERAL (
+            SELECT
+                {columns}
+            FROM (
+                SELECT
+                    valid.is_valid_json,
+                    CASE WHEN valid.is_valid_json THEN main_host.variables::jsonb END AS vars
+                FROM (
+                    SELECT metrics_utility_is_valid_json(main_host.variables) AS is_valid_json
+                ) AS valid
+            ) AS parsed
+        ) AS host_vars ON TRUE"""
+
+
 def collector(func):
     """Decorator that creates a collector class and returns a constructor function."""
 

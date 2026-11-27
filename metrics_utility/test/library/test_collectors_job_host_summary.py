@@ -109,3 +109,40 @@ def test_job_host_summary_isoformat(mock_copy_pandas):
     # Should contain isoformat timestamps
     assert '2024-06-15T12:30:45+00:00' in query
     assert '2024-06-16T14:45:30+00:00' in query
+
+
+@patch('metrics_utility.library.collectors.util._copy_table_pandas')
+def test_job_host_summary_orphan_host_id_preserved(mock_copy_pandas):
+    """A summary row whose host_id has no main_host row keeps its (NULL) host variables."""
+    mock_copy_pandas.return_value = pd.DataFrame({'id': [1], 'host_remote_id': [None]})
+
+    job_host_summary(db=_mock_db(), since=datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)).gather()
+
+    query = mock_copy_pandas.call_args[0][1]
+    assert 'LEFT JOIN main_host ON main_host.id = filtered_hosts.host_id' in query
+    assert 'LEFT JOIN hosts_variables ON hosts_variables.host_id = main_jobhostsummary.host_id' in query
+    assert 'LEFT JOIN LATERAL (' in query
+    assert ') AS host_vars ON TRUE' in query
+
+
+@patch('metrics_utility.library.collectors.util._copy_table_pandas')
+def test_job_host_summary_parses_variables_once_per_row(mock_copy_pandas):
+    """Validity check and JSONB cast run once per host and are reused for both values."""
+    mock_copy_pandas.return_value = pd.DataFrame()
+
+    job_host_summary(
+        db=_mock_db(),
+        since=datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC),
+        until=None,
+    ).gather()
+
+    query = mock_copy_pandas.call_args[0][1]
+    assert query.count('metrics_utility_is_valid_json(') == 1
+    assert query.count('main_host.variables::jsonb') == 1
+    assert query.count('metrics_utility_parse_yaml_field(') == 2
+    assert 'LEFT JOIN LATERAL (' in query
+    assert ') AS host_vars ON TRUE' in query
+    assert 'CROSS JOIN LATERAL' not in query
+    assert '--' not in query
+    assert 'host_vars.ansible_host AS ansible_host_variable' in query
+    assert 'host_vars.ansible_connection AS ansible_connection_variable' in query

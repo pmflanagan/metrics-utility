@@ -179,3 +179,27 @@ def test_host_metric_query_no_filters():
 
     assert 'WHERE true' in query
     assert params == []
+
+
+def test_host_metric_query_orphan_host_row_keeps_null_variables():
+    """A host-metric row without a matching main_host row survives with NULL variables."""
+    query, _ = _host_metric_query(since=SINCE)
+
+    assert 'LEFT JOIN main_host ON main_host.name = main_hostmetric.hostname' in query
+    assert 'LEFT JOIN LATERAL (' in query
+    assert ') AS host_vars ON TRUE' in query
+
+
+def test_host_metric_query_parses_variables_once_per_row():
+    """Validity check and JSONB cast run once per row and are reused for both values."""
+    query, _ = _host_metric_query(since=SINCE)
+
+    assert query.count('metrics_utility_is_valid_json(') == 1
+    assert query.count('main_host.variables::jsonb') == 1
+    assert query.count('metrics_utility_parse_yaml_field(') == 2
+    assert 'LEFT JOIN LATERAL (' in query
+    assert ') AS host_vars ON TRUE' in query
+    assert 'CROSS JOIN LATERAL' not in query
+    assert '--' not in query
+    assert 'host_vars.ansible_host AS ansible_host_variable' in query
+    assert 'host_vars.ansible_connection AS ansible_connection_variable' in query

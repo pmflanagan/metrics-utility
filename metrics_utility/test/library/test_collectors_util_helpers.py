@@ -11,6 +11,7 @@ from metrics_utility.library.collectors.util import (
     _copy_table_pandas,
     date_where,
     ensure_functions,
+    host_vars_lateral_sql,
 )
 from metrics_utility.test.util import utcdt
 
@@ -382,3 +383,44 @@ class TestDateWhere:
         assert 'main_host.created <' in result
         # must NOT be quoted as "main_host.created" — PostgreSQL would treat that as a single identifier
         assert '"main_host.created"' not in result
+
+
+class TestHostVarsLateralSql:
+    """Test the host_vars_lateral_sql helper."""
+
+    def test_left_join_lateral_on_true(self):
+        """The fragment is an unconditionally-safe LEFT JOIN ... ON TRUE."""
+        result = host_vars_lateral_sql(('ansible_host',))
+
+        assert result.startswith('        LEFT JOIN LATERAL (')
+        assert result.endswith(') AS host_vars ON TRUE')
+        assert 'CROSS JOIN' not in result
+
+    def test_one_case_per_requested_field(self):
+        """Each field is extracted once, with a YAML fallback and its own alias."""
+        result = host_vars_lateral_sql(('ansible_host', 'ansible_port', 'ansible_connection'))
+
+        assert result.count('metrics_utility_parse_yaml_field(') == 3
+        for field in ('ansible_host', 'ansible_port', 'ansible_connection'):
+            assert f"parsed.vars->>'{field}'" in result
+            assert f"metrics_utility_parse_yaml_field(main_host.variables, '{field}')" in result
+            assert f'AS {field}' in result
+
+    def test_parses_variables_once(self):
+        """Validity check and JSONB cast are evaluated once per row, not once per field."""
+        result = host_vars_lateral_sql(('ansible_host', 'ansible_port', 'ansible_connection'))
+
+        assert result.count('metrics_utility_is_valid_json(') == 1
+        assert result.count('main_host.variables::jsonb') == 1
+
+    def test_has_no_sql_comments(self):
+        """Explanatory text lives in the docstring so pg_stat_statements stays clean."""
+        result = host_vars_lateral_sql(('ansible_host',))
+
+        assert '--' not in result
+
+    @pytest.mark.parametrize('field', ['ansible host', "ansible_host'; DROP TABLE main_host; --", ''])
+    def test_rejects_invalid_field_names(self, field):
+        """Field names are interpolated into SQL, so they must be plain identifiers."""
+        with pytest.raises(ValueError, match='invalid field name'):
+            host_vars_lateral_sql((field,))

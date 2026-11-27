@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
-from metrics_utility.library.collectors.controller.main_host import main_host, main_host_daily
+from metrics_utility.library.collectors.controller.main_host import _main_host_query, main_host, main_host_daily
 
 
 def _mock_db():
@@ -83,6 +83,9 @@ def test_main_host_preserves_host_without_hostmetric(mock_copy_pandas):
     assert pd.isna(result.iloc[0]['first_automation'])
     query = mock_copy_pandas.call_args[0][1]
     assert 'LEFT JOIN main_hostmetric ON main_hostmetric.hostname = main_host.name' in query
+    # the variable lateral never drops the host row either
+    assert 'LEFT JOIN LATERAL (' in query
+    assert ') AS host_vars ON TRUE' in query
 
 
 @patch('metrics_utility.library.collectors.util._copy_table_pandas')
@@ -116,6 +119,44 @@ def test_main_host_uses_yaml_json_functions(mock_copy_pandas):
     # Should use helper functions for parsing YAML/JSON
     assert 'metrics_utility_is_valid_json' in query
     assert 'metrics_utility_parse_yaml_field' in query
+
+
+def test_main_host_parses_variables_once_per_row():
+    """Validity check and JSONB cast run once per row and are reused for every value."""
+    query = _main_host_query("enabled='t'")
+
+    assert query.count('metrics_utility_is_valid_json(') == 1
+    assert query.count('main_host.variables::jsonb') == 1
+    assert 'LEFT JOIN LATERAL (' in query
+    assert ') AS host_vars ON TRUE' in query
+    assert 'CROSS JOIN LATERAL' not in query
+
+    # ansible_host/port/connection are computed once in the lateral, then reused
+    # by both the top-level column and the jsonb objects.
+    assert query.count('metrics_utility_parse_yaml_field(') == 3
+    assert 'host_vars.ansible_host AS ansible_host_variable' in query
+    assert "'ansible_host', host_vars.ansible_host" in query
+    assert "host_vars.ansible_port ~ '^[0-9]+$'" in query
+    assert "'ansible_connection_variable', host_vars.ansible_connection" in query
+    # the lateral is a plain join, so hosts with no variables row are preserved
+    assert '--' not in query
+
+
+@patch('metrics_utility.library.collectors.util._copy_table_pandas')
+def test_main_host_daily_parses_variables_once_per_row(mock_copy_pandas):
+    """The incremental collector shares the single-pass variable parsing query."""
+    mock_copy_pandas.return_value = pd.DataFrame()
+
+    main_host_daily(
+        db=_mock_db(),
+        since=datetime.datetime(2025, 1, 1, tzinfo=datetime.UTC),
+        until=None,
+    ).gather()
+
+    query = mock_copy_pandas.call_args[0][1]
+    assert query.count('metrics_utility_is_valid_json(') == 1
+    assert query.count('main_host.variables::jsonb') == 1
+    assert query.count('metrics_utility_parse_yaml_field(') == 3
 
 
 @patch('metrics_utility.library.collectors.util._copy_table_pandas')

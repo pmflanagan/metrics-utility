@@ -1,6 +1,6 @@
 """Collector for job_host_summary records from the Controller database."""
 
-from ..util import DataframeOutput, collector, date_where, ensure_functions
+from ..util import DataframeOutput, collector, date_where, ensure_functions, host_vars_lateral_sql
 
 
 @collector
@@ -21,6 +21,7 @@ def job_host_summary(*, db=None, since=None, until=None, output=DataframeOutput(
         pandas DataFrame or list of CSV file paths depending on *output*.
     """
     where = date_where('main_jobhostsummary.modified', since, until)
+    host_vars_sql = host_vars_lateral_sql(('ansible_host', 'ansible_connection'))
 
     # TODO: controler needs to have an index on main_jobhostsummary.modified
     query = f"""
@@ -33,18 +34,11 @@ def job_host_summary(*, db=None, since=None, until=None, output=DataframeOutput(
             hosts_variables AS (
                 SELECT
                     filtered_hosts.host_id,
-                    CASE
-                        WHEN (metrics_utility_is_valid_json(main_host.variables))
-                        THEN main_host.variables::jsonb->>'ansible_host'
-                        ELSE metrics_utility_parse_yaml_field(main_host.variables, 'ansible_host' )
-                    END AS ansible_host_variable,
-                    CASE
-                        WHEN (metrics_utility_is_valid_json(main_host.variables))
-                        THEN main_host.variables::jsonb->>'ansible_connection'
-                        ELSE metrics_utility_parse_yaml_field(main_host.variables, 'ansible_connection' )
-                    END AS ansible_connection_variable
+                    host_vars.ansible_host AS ansible_host_variable,
+                    host_vars.ansible_connection AS ansible_connection_variable
                 FROM filtered_hosts
                 LEFT JOIN main_host ON main_host.id = filtered_hosts.host_id
+{host_vars_sql}
             )
         SELECT
             main_jobhostsummary.id,
@@ -74,17 +68,11 @@ def job_host_summary(*, db=None, since=None, until=None, output=DataframeOutput(
             main_unifiedjobtemplate_project.id AS project_remote_id,
             main_unifiedjobtemplate_project.name AS project_name
         FROM main_jobhostsummary
-        -- connect to main_job, that has connections into inventory and project
         LEFT JOIN main_job ON main_jobhostsummary.job_id = main_job.unifiedjob_ptr_id
-        -- get project name from project_options
         LEFT JOIN main_unifiedjobtemplate AS main_unifiedjobtemplate_project ON main_unifiedjobtemplate_project.id = main_job.project_id
-        -- get inventory name from main_inventory
         LEFT JOIN main_inventory ON main_inventory.id = main_job.inventory_id
-        -- get job name from main_unifiedjob
         LEFT JOIN main_unifiedjob ON main_unifiedjob.id = main_jobhostsummary.job_id
-        -- get organization name from main_organization
         LEFT JOIN main_organization ON main_organization.id = main_unifiedjob.organization_id
-        -- get variables from precomputed hosts_variables
         LEFT JOIN hosts_variables ON hosts_variables.host_id = main_jobhostsummary.host_id
         WHERE {where}
         ORDER BY main_jobhostsummary.modified ASC

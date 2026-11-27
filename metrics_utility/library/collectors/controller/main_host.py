@@ -1,6 +1,6 @@
 """Collectors for host inventory data from the Controller database."""
 
-from ..util import DataframeOutput, collector, date_where, ensure_functions
+from ..util import DataframeOutput, collector, date_where, ensure_functions, host_vars_lateral_sql
 
 
 def _main_host_query(where):
@@ -12,6 +12,8 @@ def _main_host_query(where):
     Returns:
         Complete SQL query string selecting host inventory fields.
     """
+    host_vars_sql = host_vars_lateral_sql(('ansible_host', 'ansible_port', 'ansible_connection'))
+
     return f"""
         SELECT
             main_host.name as host_name,
@@ -23,49 +25,23 @@ def _main_host_query(where):
             main_unifiedjob.created AS last_automation,
             main_hostmetric.first_automation,
 
-            CASE
-                WHEN (metrics_utility_is_valid_json(main_host.variables))
-                THEN main_host.variables::jsonb->>'ansible_host'
-                ELSE metrics_utility_parse_yaml_field(main_host.variables, 'ansible_host' )
-            END AS ansible_host_variable,
+            host_vars.ansible_host AS ansible_host_variable,
 
             jsonb_build_object(
                 'ansible_product_serial', main_host.ansible_facts->>'ansible_product_serial'::TEXT,
                 'ansible_machine_id', main_host.ansible_facts->>'ansible_machine_id'::TEXT,
-                'ansible_host',
-                CASE
-                    WHEN (metrics_utility_is_valid_json(main_host.variables))
-                    THEN main_host.variables::jsonb->>'ansible_host'
-                    ELSE metrics_utility_parse_yaml_field(main_host.variables, 'ansible_host' )
-                END,
+                'ansible_host', host_vars.ansible_host,
                 'host_name', main_host.name,
                 'ansible_port',
                 CASE
-                    WHEN (
-                        CASE
-                            WHEN (metrics_utility_is_valid_json(main_host.variables))
-                            THEN main_host.variables::jsonb->>'ansible_port'
-                            ELSE metrics_utility_parse_yaml_field(main_host.variables, 'ansible_port' )
-                        END
-                    ) ~ '^[0-9]+$'
-                    THEN (
-                        CASE
-                            WHEN (metrics_utility_is_valid_json(main_host.variables))
-                            THEN main_host.variables::jsonb->>'ansible_port'
-                            ELSE metrics_utility_parse_yaml_field(main_host.variables, 'ansible_port' )
-                        END
-                    )::INTEGER
+                    WHEN host_vars.ansible_port ~ '^[0-9]+$'
+                    THEN host_vars.ansible_port::INTEGER
                     ELSE NULL
                 END
             ) AS canonical_facts,
 
             jsonb_build_object(
-                'ansible_connection_variable',
-                CASE
-                    WHEN (metrics_utility_is_valid_json(main_host.variables))
-                    THEN main_host.variables::jsonb->>'ansible_connection'
-                    ELSE metrics_utility_parse_yaml_field(main_host.variables, 'ansible_connection' )
-                END,
+                'ansible_connection_variable', host_vars.ansible_connection,
                 'ansible_virtualization_type',
                 main_host.ansible_facts->>'ansible_virtualization_type'::TEXT,
                 'ansible_virtualization_role',
@@ -100,6 +76,7 @@ def _main_host_query(where):
             LIMIT 1
         ) AS latest_job_host_summary ON TRUE
         LEFT JOIN main_unifiedjob ON main_unifiedjob.id = latest_job_host_summary.job_id
+{host_vars_sql}
         WHERE {where}
         ORDER BY main_host.id ASC
     """

@@ -1,6 +1,6 @@
 """Collector for host metric data from the Controller database."""
 
-from ..util import DataframeOutput, collector, date_where, ensure_functions
+from ..util import DataframeOutput, collector, date_where, ensure_functions, host_vars_lateral_sql
 
 
 # Rows fetched per keyset page when materialising into a DataFrame. COPY-based
@@ -27,6 +27,8 @@ def _host_metric_query(*, since=None, until=None, marker=None, limit=None):
         limit_sql = 'LIMIT %s'
         params.append(limit)
 
+    host_vars_sql = host_vars_lateral_sql(('ansible_host', 'ansible_connection'))
+
     query = f"""
         SELECT
             main_hostmetric.hostname,
@@ -41,19 +43,12 @@ def _host_metric_query(*, since=None, until=None, marker=None, limit=None):
             main_hostmetric.used_in_inventories,
             main_host.ansible_facts->>'ansible_product_serial'::TEXT AS ansible_product_serial,
             main_host.ansible_facts->>'ansible_machine_id'::TEXT AS ansible_machine_id,
-            CASE
-                WHEN (metrics_utility_is_valid_json(main_host.variables))
-                    THEN main_host.variables::jsonb->>'ansible_host'
-                ELSE metrics_utility_parse_yaml_field(main_host.variables, 'ansible_host' )
-            END AS ansible_host_variable,
-            CASE
-                WHEN (metrics_utility_is_valid_json(main_host.variables))
-                    THEN main_host.variables::jsonb->>'ansible_connection'
-                ELSE metrics_utility_parse_yaml_field(main_host.variables, 'ansible_connection' )
-            END AS ansible_connection_variable
+            host_vars.ansible_host AS ansible_host_variable,
+            host_vars.ansible_connection AS ansible_connection_variable
 
         FROM main_hostmetric
         LEFT JOIN main_host ON main_host.name = main_hostmetric.hostname
+{host_vars_sql}
         WHERE {where_sql}
         ORDER BY main_hostmetric.hostname ASC, COALESCE(main_host.id, 0) ASC
         {limit_sql}
